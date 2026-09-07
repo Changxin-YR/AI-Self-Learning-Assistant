@@ -95,6 +95,7 @@ def test_document_retry_conversation_lifecycle_and_agent_tool():
     retry = client.post(f"/api/v1/documents/{doc_id}/retry", headers=auth)
     assert retry.status_code == 200
     assert retry.json()["data"]["status"] == "FAILED"
+    client.post(f"/api/v1/knowledge-bases/{kb['id']}/documents", headers=auth, files={"file": ("notes.txt", "学习任务需要按计划完成。".encode(), "text/plain")})
     conversation = client.post("/api/v1/conversations", headers=auth, json={"knowledge_base_id": kb["id"]}).json()["data"]
     assert client.get("/api/v1/conversations", headers=auth).json()["data"]["items"]
     assert client.delete(f"/api/v1/conversations/{conversation['id']}", headers=auth).status_code == 200
@@ -129,6 +130,8 @@ def test_access_token_is_jwt_and_websocket_streams_events():
 def test_quiz_supports_multiple_and_true_false_without_leaking_answers():
     token = login(); auth = headers(token)
     kb = client.post("/api/v1/knowledge-bases", headers=auth, json={"name": "题型库"}).json()["data"]
+    upload = client.post(f"/api/v1/knowledge-bases/{kb['id']}/documents", headers=auth, files={"file": ("quiz.txt", "资料包含一个关键结论。".encode(), "text/plain")})
+    assert upload.status_code == 200
     quiz = client.post("/api/v1/quizzes", headers=auth, json={"knowledge_base_id": kb["id"], "question_count": 5, "question_types": ["MULTIPLE", "TRUE_FALSE"]})
     assert quiz.status_code == 200
     questions = quiz.json()["data"]["questions"]

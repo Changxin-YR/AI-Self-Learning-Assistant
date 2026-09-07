@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-from pathlib import Path
 
 
 def extract_document_text(data: bytes, extension: str) -> str:
@@ -19,6 +18,6 @@ def extract_document_text(data: bytes, extension: str) -> str:
         if extension == 'pptx':
             from pptx import Presentation
             return '\n\n'.join(shape.text for slide in Presentation(io.BytesIO(data)).slides for shape in slide.shapes if hasattr(shape, 'text'))
-    except Exception:
-        return data.decode('utf-8', errors='ignore')
-    return data.decode('utf-8', errors='ignore')
+    except Exception as error:
+        raise ValueError('DOCUMENT_PARSE_FAILED') from error
+    raise ValueError('DOCUMENT_UNSUPPORTED')

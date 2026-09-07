@@ -8,11 +8,11 @@ StudyAgent 是一个基于个人学习资料的 AI 知识库助手。当前仓�
 
 - DEV_MODE 登录、签名 Token、401 处理与用户级资源隔离
 - 知识库 CRUD、文件扩展名/大小校验、TXT/MD 实际解析、切片和 READY 状态
-- 基于知识库片段的 Mock RAG 问答与可追溯 citation；资料不足时明确拒答
+- DEV_MODE 使用 Fake Embedding/LLM 的可重复 RAG；生产通过 Embedding + Qdrant TopK 过滤检索并返回可追溯 citation，资料不足时明确拒答
 - 学习计划草案、确认激活、今日任务与完成状态
 - 结构化测验生成、答题阶段隐藏标准答案、提交评分、错题记录与重复提交保护
 - 首页、知识库、学习、我的四个 Tab，加载/空态/错误/上传状态/聊天状态
-- Alembic 初始迁移、Docker Compose、CI 工作流和 `.env.example`
+- Alembic 初始迁移与生命周期迁移、Docker Compose、CI 工作流和 `.env.example`
 - 微信小程序四 Tab、微信登录回退、资料上传、AI 问答、学习计划、任务完成、测验答题与结果页
 
 ## 本地启动
@@ -73,4 +73,4 @@ deploy/docker-compose.yml   MySQL/Redis/Qdrant/MinIO/API/Worker
 
 ## 已知限制
 
-开发模式使用 SQLite、Fake AI 和本地对象存储；配置 `LLM_PROVIDER=openai_compatible`、`VECTOR_PROVIDER=qdrant` 和 MySQL/Redis/MinIO 后切换生产依赖。微信正式发布仍需要真实 AppID、HTTPS 域名、隐私协议和平台审核，这些不能由本地代码代替。
+开发模式使用 SQLite、Fake AI 和本地对象存储；生产启动会拒绝 Fake/Local，并探测 MySQL、Redis、S3、Qdrant、LLM 和 Embedding。微信正式发布仍需要真实 AppID、HTTPS 域名、微信合法域名、隐私协议、备案/AI 合规材料和真机审核，这些不能由本地代码代替。

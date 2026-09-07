@@ -1,4 +1,3 @@
 {
-  "requiredPrivateInfos": [],
-  "privacyItems": []
+  "requiredPrivateInfos": ["chooseMessageFile"]
 }
