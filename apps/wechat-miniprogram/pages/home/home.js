@@ -12,6 +12,10 @@ Page({
   },
   goLibrary() { wx.switchTab({ url: '/pages/library/library' }) },
   goLearning() { wx.switchTab({ url: '/pages/learning/learning' }) },
-  openChat() { const kb = this.data.libraries[0]; if (!kb) { this.goLibrary(); return } wx.navigateTo({ url: `/pages/chat/chat?kbId=${kb.id}&name=${encodeURIComponent(kb.name)}` }) },
+  openChat(event) {
+    const kb = event?.currentTarget?.dataset?.kb || this.data.libraries[0]
+    if (!kb) { this.goLibrary(); return }
+    wx.navigateTo({ url: `/pages/chat/chat?kbId=${kb.id}&name=${encodeURIComponent(kb.name)}` })
+  },
   createPlan() { this.goLearning() }
 })
