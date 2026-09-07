@@ -105,9 +105,10 @@ def test_document_delete_failure_is_retryable(monkeypatch):
 
     from app import main
     monkeypatch.setattr(main, "get_storage", lambda: BrokenStorage())
+    monkeypatch.setattr("app.storage.get_storage", lambda: BrokenStorage())
     response = client.delete(f"/api/v1/documents/{document['id']}", headers=auth(token))
-    assert response.status_code == 503
-    assert client.get(f"/api/v1/documents/{document['id']}", headers=auth(token)).status_code == 200
+    assert response.status_code == 200
+    assert client.get(f"/api/v1/documents/{document['id']}", headers=auth(token)).status_code == 404
 
 
 def test_rebuild_ready_document_reprocesses_index():
@@ -203,6 +204,15 @@ def test_production_providers_fail_fast(monkeypatch):
         get_llm_provider()
     with pytest.raises(RuntimeError, match="FAKE_FORBIDDEN"):
         get_embedding_provider()
+
+
+def test_production_content_safety_requires_explicit_provider(monkeypatch):
+    from app.safety import get_content_safety_provider
+
+    monkeypatch.setenv("DEV_MODE", "false")
+    monkeypatch.delenv("CONTENT_SAFETY_PROVIDER", raising=False)
+    with pytest.raises(RuntimeError, match="CONTENT_SAFETY_PROVIDER_REQUIRED"):
+        get_content_safety_provider()
 
 
 def test_local_storage_and_vector_cleanup(tmp_path):
@@ -321,6 +331,116 @@ def test_account_deletion_cleans_user_data_and_storage():
         assert db.query(User).filter(User.id == user_id, User.status == "DISABLED", User.nickname == "已注销用户").count() == 1
 
 
+def test_document_delete_commits_and_persists_cleanup_job_when_storage_fails(monkeypatch):
+    from app.main import CleanupJob, Document, SessionLocal
+    from app import main
+
+    token = login("cleanup-outbox")
+    kb = make_kb(token)
+    document = upload(token, kb["id"], "需要异步清理的资料。")
+
+    class BrokenStorage:
+        def delete(self, key):
+            raise OSError("storage unavailable")
+
+    monkeypatch.setattr(main, "get_storage", lambda: BrokenStorage())
+    monkeypatch.setattr("app.storage.get_storage", lambda: BrokenStorage())
+    response = client.delete(f"/api/v1/documents/{document['id']}", headers=auth(token))
+    assert response.status_code == 200
+    with SessionLocal() as db:
+        deleted = db.get(Document, document["id"])
+        from sqlalchemy import select
+        job = db.scalar(select(CleanupJob).where(CleanupJob.resource_id == document["id"], CleanupJob.operation == "delete_storage"))
+        assert deleted.status == "DELETED"
+        assert job.status in {"RETRYING", "FAILED"}
+        job_id = job.id
+
+    class WorkingStorage:
+        def delete(self, key):
+            return None
+
+    monkeypatch.setattr(main, "get_storage", lambda: WorkingStorage())
+    monkeypatch.setattr("app.storage.get_storage", lambda: WorkingStorage())
+    from app.worker import process_cleanup_job_sync
+    retried = client.post(f"/api/v1/cleanup-jobs/{job_id}/retry", headers=auth(token))
+    assert retried.status_code == 200 and retried.json()["data"]["status"] == "SUCCEEDED"
+    assert process_cleanup_job_sync(job_id)["status"] == "SUCCEEDED"
+
+
+def test_cleanup_jobs_are_user_scoped_and_qdrant_retryable(monkeypatch):
+    from app.main import CleanupJob, SessionLocal
+    from app import main
+
+    token_a, token_b = login("cleanup-a"), login("cleanup-b")
+    kb_a = make_kb(token_a, "A")
+    document = upload(token_a, kb_a["id"], "A 的向量资料。")
+
+    class BrokenVector:
+        def delete_by_document(self, user_id, document_id):
+            raise OSError("qdrant unavailable")
+
+    monkeypatch.setattr(main, "get_vector_store", lambda: BrokenVector())
+    monkeypatch.setattr("app.vector_store.get_vector_store", lambda: BrokenVector())
+    assert client.delete(f"/api/v1/documents/{document['id']}", headers=auth(token_a)).status_code == 200
+    jobs_a = client.get("/api/v1/cleanup-jobs", headers=auth(token_a)).json()["data"]["items"]
+    assert jobs_a and all(item["user_id"] == 1 or item["resource_id"] == document["id"] for item in jobs_a)
+    assert client.get("/api/v1/cleanup-jobs", headers=auth(token_b)).json()["data"]["items"] == []
+    with SessionLocal() as db:
+        assert db.query(CleanupJob).filter(CleanupJob.user_id != document.get("user_id", 0)).count() >= 1
+
+
+def test_cleanup_job_reaches_failed_after_bounded_retries(monkeypatch):
+    from app import main
+    from app.main import CleanupJob, SessionLocal
+    from app.worker import process_cleanup_job_sync
+
+    token = login("cleanup-final-failure")
+    kb = make_kb(token)
+    document = upload(token, kb["id"], "最终失败清理。")
+
+    class BrokenStorage:
+        def delete(self, key):
+            raise OSError("storage unavailable")
+
+    monkeypatch.setattr(main, "get_storage", lambda: BrokenStorage())
+    monkeypatch.setattr("app.storage.get_storage", lambda: BrokenStorage())
+    assert client.delete(f"/api/v1/documents/{document['id']}", headers=auth(token)).status_code == 200
+    with SessionLocal() as db:
+        job = db.scalar(__import__("sqlalchemy").select(CleanupJob).where(CleanupJob.resource_id == document["id"], CleanupJob.operation == "delete_storage"))
+        job.next_retry_at = None
+        db.commit()
+        job_id = job.id
+    monkeypatch.setattr("app.worker.CLEANUP_MAX_RETRIES", 2)
+    process_cleanup_job_sync(job_id)
+    with SessionLocal() as db:
+        job = db.get(CleanupJob, job_id)
+        job.next_retry_at = None
+        db.commit()
+    assert process_cleanup_job_sync(job_id)["status"] == "FAILED"
+
+
+def test_cleanup_dispatch_failure_keeps_committed_job_retryable(monkeypatch):
+    from app import main
+    from app.main import CleanupJob, SessionLocal
+
+    monkeypatch.setenv("JWT_SECRET", "production-test-secret-with-enough-entropy-123456")
+    token = login("cleanup-broker")
+    kb = make_kb(token)
+    document = upload(token, kb["id"], "消息队列中断时仍需清理。")
+    monkeypatch.setattr(main, "is_dev", lambda: False)
+
+    class BrokenTask:
+        def delay(self, job_id):
+            raise OSError("redis unavailable")
+
+    monkeypatch.setattr("app.worker.process_cleanup_job", BrokenTask())
+    response = client.delete(f"/api/v1/documents/{document['id']}", headers=auth(token))
+    assert response.status_code == 200
+    with SessionLocal() as db:
+        job = db.scalar(__import__("sqlalchemy").select(CleanupJob).where(CleanupJob.resource_id == document["id"], CleanupJob.operation == "delete_storage"))
+        assert job and job.status == "RETRYING" and job.last_error == "CLEANUP_QUEUE_UNAVAILABLE"
+
+
 def test_memory_extract_uses_structured_provider_and_user_scope(monkeypatch):
     class Provider:
         async def structured_output(self, instruction, schema, contexts):
@@ -350,3 +470,25 @@ def test_quiz_errors_adjust_follow_up_plan_task():
     with SessionLocal() as db:
         assert db.query(StudyPlan).filter(StudyPlan.id == plan["id"], StudyPlan.progress_percent >= 0).count() == 1
         assert any("重点复习" in task.description for task in db.query(StudyTask).filter(StudyTask.study_plan_id == plan["id"]).all())
+
+
+def test_adaptive_plan_is_bounded_and_prioritizes_repeated_wrong_answers():
+    from app.main import Mastery, StudyTask, WrongQuestion, adjust_plan_after_quiz
+
+    token = login("adaptive-bounded")
+    kb = make_kb(token)
+    upload(token, kb["id"], "自适应复习资料。")
+    plan = client.post("/api/v1/study-plans", headers=auth(token), json={"name": "自适应", "knowledge_base_id": kb["id"], "target_date": (date.today() + timedelta(days=4)).isoformat(), "daily_minutes": 40}).json()["data"]
+    client.post(f"/api/v1/study-plans/{plan['id']}/activate", headers=auth(token))
+    with SessionLocal() as db:
+        mastery = Mastery(user_id=1, knowledge_base_id=kb["id"], topic="薄弱主题", mastery_score=20, quiz_count=4, correct_count=1)
+        db.add(mastery)
+        db.add(WrongQuestion(user_id=1, question_id=999, knowledge_base_id=kb["id"], wrong_count=4))
+        db.commit()
+        adjust_plan_after_quiz(db, 1, kb["id"], ["薄弱主题"])
+        db.commit()
+        first = db.query(StudyTask).filter(StudyTask.study_plan_id == plan["id"], StudyTask.task_type == "REVIEW").count()
+        adjust_plan_after_quiz(db, 1, kb["id"], ["薄弱主题"])
+        db.commit()
+        second = db.query(StudyTask).filter(StudyTask.study_plan_id == plan["id"], StudyTask.task_type == "REVIEW").count()
+        assert first == second == 1

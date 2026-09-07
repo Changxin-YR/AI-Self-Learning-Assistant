@@ -90,6 +90,18 @@ class FakeEmbeddingProvider:
         return vector
 
 
+class TestLLMProvider(FakeLLMProvider):
+    """Deterministic provider allowed only by an explicit production-like E2E flag."""
+
+    def health(self) -> str:
+        return "test-provider"
+
+
+class TestEmbeddingProvider(FakeEmbeddingProvider):
+    def health(self) -> str:
+        return "test-provider"
+
+
 class OpenAICompatibleLLM:
     def __init__(self, base_url: str, api_key: str, model: str):
         self.base_url, self.api_key, self.model = base_url.rstrip("/"), api_key, model
@@ -199,6 +211,10 @@ def get_llm_provider() -> LLMProvider:
         if not dev_mode():
             raise RuntimeError("LLM_PROVIDER_FAKE_FORBIDDEN")
         return FakeLLMProvider()
+    if provider == "test":
+        if os.getenv("TEST_LLM_PROVIDER", "false").lower() != "true":
+            raise RuntimeError("TEST_LLM_PROVIDER_NOT_ENABLED")
+        return TestLLMProvider()
     if provider in {"openai", "openai_compatible", "qwen", "deepseek"}:
         return OpenAICompatibleLLM(_required("LLM_BASE_URL"), _required("LLM_API_KEY"), _required("LLM_MODEL"))
     raise RuntimeError("LLM_PROVIDER_UNSUPPORTED")
@@ -210,6 +226,10 @@ def get_embedding_provider() -> EmbeddingProvider:
         if not dev_mode():
             raise RuntimeError("EMBEDDING_PROVIDER_FAKE_FORBIDDEN")
         return FakeEmbeddingProvider()
+    if provider == "test":
+        if os.getenv("TEST_LLM_PROVIDER", "false").lower() != "true":
+            raise RuntimeError("TEST_EMBEDDING_PROVIDER_NOT_ENABLED")
+        return TestEmbeddingProvider()
     if provider in {"openai", "openai_compatible", "qwen", "deepseek"}:
         return OpenAICompatibleEmbedding(_required("EMBEDDING_BASE_URL"), _required("EMBEDDING_API_KEY"), _required("EMBEDDING_MODEL"), int(os.getenv("EMBEDDING_DIMENSION", "1536")))
     raise RuntimeError("EMBEDDING_PROVIDER_UNSUPPORTED")

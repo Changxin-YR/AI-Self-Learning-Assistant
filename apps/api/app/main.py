@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -22,6 +22,7 @@ import jwt
 from .providers import dev_mode, get_embedding_provider, get_llm_provider, probe_provider_config, validate_provider_config
 from .storage import get_storage
 from .vector_store import get_vector_store
+from .safety import Risk, get_content_safety_provider
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -260,6 +261,45 @@ class UserMemory(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class ModerationLog(Base):
+    __tablename__ = "moderation_logs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    content_type: Mapped[str] = mapped_column(String(30))
+    decision: Mapped[str] = mapped_column(String(20), index=True)
+    reason: Mapped[str] = mapped_column(String(120), default="")
+    content_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class UserReport(Base):
+    __tablename__ = "user_reports"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    target_type: Mapped[str] = mapped_column(String(30))
+    target_id: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(20), default="OPEN", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CleanupJob(Base):
+    __tablename__ = "cleanup_jobs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    resource_type: Mapped[str] = mapped_column(String(40), index=True)
+    resource_id: Mapped[int] = mapped_column(Integer, index=True)
+    operation: Mapped[str] = mapped_column(String(80))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 def is_dev() -> bool:
     return os.getenv("DEV_MODE", str(DEV_MODE)).lower() == "true"
 
@@ -480,6 +520,98 @@ def dependency_error(error: Exception) -> str:
     return code[:80] if re.fullmatch(r"[A-Z0-9_\-]+", code) else type(error).__name__
 
 
+def moderate(db: Session, user_id: int | None, content_type: str, text: str):
+    decision = get_content_safety_provider().check_input(text) if content_type == "input" else get_content_safety_provider().check_output(text) if content_type == "output" else get_content_safety_provider().check_upload_text(text)
+    db.add(ModerationLog(user_id=user_id, content_type=content_type, decision=decision.risk.value, reason=decision.reason, content_hash=hashlib.sha256((text or "").encode("utf-8")).hexdigest()))
+    db.flush()
+    return decision
+
+
+def require_safe_input(db: Session, user_id: int, text: str) -> None:
+    try:
+        decision = moderate(db, user_id, "input", text)
+    except Exception as error:
+        db.rollback()
+        raise HTTPException(503, "CONTENT_SAFETY_UNAVAILABLE") from error
+    if decision.risk == Risk.BLOCK:
+        db.commit()
+        raise HTTPException(422, "CONTENT_BLOCKED")
+
+
+def require_safe_output(db: Session, user_id: int, text: str) -> None:
+    try:
+        decision = moderate(db, user_id, "output", text)
+    except Exception as error:
+        db.rollback()
+        raise HTTPException(503, "CONTENT_SAFETY_UNAVAILABLE") from error
+    if decision.risk == Risk.BLOCK:
+        db.commit()
+        raise HTTPException(503, "AI_OUTPUT_BLOCKED")
+
+
+CLEANUP_MAX_RETRIES = max(1, int(os.getenv("CLEANUP_MAX_RETRIES", "5")))
+
+
+def create_cleanup_job(db: Session, user_id: int, resource_type: str, resource_id: int, operation: str, payload: dict[str, Any]) -> CleanupJob:
+    """Persist one idempotent external-resource cleanup intent."""
+    existing = db.scalar(
+        select(CleanupJob).where(
+            CleanupJob.user_id == user_id,
+            CleanupJob.resource_type == resource_type,
+            CleanupJob.resource_id == resource_id,
+            CleanupJob.operation == operation,
+            CleanupJob.status.in_({"PENDING", "PROCESSING", "RETRYING", "SUCCEEDED"}),
+        ).order_by(CleanupJob.id.desc())
+    )
+    if existing:
+        return existing
+    job = CleanupJob(user_id=user_id, resource_type=resource_type, resource_id=resource_id, operation=operation, payload=payload)
+    db.add(job)
+    db.flush()
+    return job
+
+
+def dispatch_cleanup_jobs(job_ids: list[int]) -> None:
+    if not job_ids:
+        return
+    from .worker import process_cleanup_job, process_cleanup_job_sync
+
+    for job_id in job_ids:
+        try:
+            if is_dev():
+                process_cleanup_job_sync(job_id)
+            else:
+                process_cleanup_job.delay(job_id)
+        except Exception:
+            # The intent is already durable; a broker outage must not turn a
+            # committed deletion into a misleading 500 response.
+            with SessionLocal() as db:
+                job = db.get(CleanupJob, job_id)
+                if job and job.status in {"PENDING", "PROCESSING"}:
+                    job.status = "RETRYING"
+                    job.retry_count += 1
+                    job.last_error = "CLEANUP_QUEUE_UNAVAILABLE"
+                    job.next_retry_at = datetime.utcnow() + timedelta(seconds=min(300, 2 ** job.retry_count))
+                    job.updated_at = datetime.utcnow()
+                    db.commit()
+
+
+def cleanup_job_json(job: CleanupJob) -> dict[str, Any]:
+    return {
+        "id": job.id,
+        "user_id": job.user_id,
+        "resource_type": job.resource_type,
+        "resource_id": job.resource_id,
+        "operation": job.operation,
+        "status": job.status,
+        "retry_count": job.retry_count,
+        "last_error": job.last_error,
+        "next_retry_at": job.next_retry_at.isoformat() if job.next_retry_at else None,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
+    }
+
+
 @app.on_event("startup")
 def validate_production_startup() -> None:
     if not is_dev():
@@ -500,6 +632,7 @@ def validate_production_startup() -> None:
         get_vector_store()
         get_llm_provider()
         get_embedding_provider()
+        get_content_safety_provider()
 
 
 @app.get("/health")
@@ -516,7 +649,7 @@ def ready(db: Session = Depends(db_session)):
     except Exception as error:
         dependencies["database"] = dependency_error(error)
     if is_dev():
-        dependencies.update({"redis": "dev-not-required", "storage": "ok", "qdrant": "dev-not-required", **validate_provider_config()})
+        dependencies.update({"redis": "dev-not-required", "celery": "dev-not-required", "storage": "ok", "qdrant": "dev-not-required", "content_safety": "dev-not-required", **validate_provider_config()})
     else:
         try:
             import socket
@@ -530,6 +663,7 @@ def ready(db: Session = Depends(db_session)):
             host, port = parsed.hostname or "localhost", parsed.port or 6379
             with socket.create_connection((host, port), timeout=2):
                 dependencies["redis"] = "ok"
+                dependencies["celery"] = "configured"
         except Exception as error:
             dependencies["redis"] = dependency_error(error)
         for name, getter in (("storage", get_storage), ("qdrant", get_vector_store)):
@@ -539,7 +673,13 @@ def ready(db: Session = Depends(db_session)):
             except Exception as error:
                 dependencies[name] = dependency_error(error)
         dependencies.update(probe_provider_config())
-    status = "ready" if all(value in {"ok", "dev-not-required"} for value in dependencies.values()) else "unhealthy"
+        try:
+            get_content_safety_provider()
+            dependencies["content_safety"] = "ok"
+        except Exception as error:
+            dependencies["content_safety"] = dependency_error(error)
+    healthy_values = {"ok", "dev-not-required", "configured", "test-provider"}
+    status = "ready" if all(value in healthy_values for value in dependencies.values()) else "unhealthy"
     if status != "ready":
         raise HTTPException(503, {"code": "DEPENDENCY_UNAVAILABLE", "dependencies": dependencies})
     return {"status": status, "dependencies": dependencies}
@@ -547,7 +687,7 @@ def ready(db: Session = Depends(db_session)):
 
 @app.post("/api/v1/auth/dev-login")
 def dev_login(payload: LoginIn, db: Session = Depends(db_session)):
-    if not is_dev():
+    if not is_dev() and os.getenv("TEST_LOGIN_PROVIDER", "false").lower() != "true":
         raise HTTPException(404, "NOT_FOUND")
     nickname = payload.nickname.strip() or "学习者"
     check_rate_limit(f"login:{nickname}", 10)
@@ -563,6 +703,8 @@ def dev_login(payload: LoginIn, db: Session = Depends(db_session)):
 def wechat_login(payload: dict[str, str], db: Session = Depends(db_session)):
     if is_dev():
         return dev_login(LoginIn(nickname="微信学习者"), db)
+    if os.getenv("TEST_LOGIN_PROVIDER", "false").lower() == "true":
+        return dev_login(LoginIn(nickname="Production-like E2E"), db)
     if not os.getenv("WECHAT_APP_ID") or not os.getenv("WECHAT_APP_SECRET"):
         raise HTTPException(503, "WECHAT_PROVIDER_NOT_CONFIGURED")
     code = (payload.get("code") or "").strip()
@@ -591,16 +733,11 @@ def profile(user: User = Depends(current_user)):
 def delete_account(user: User = Depends(current_user), db: Session = Depends(db_session)):
     knowledge_bases = db.scalars(select(KnowledgeBase).where(KnowledgeBase.user_id == user.id)).all()
     documents = db.scalars(select(Document).where(Document.user_id == user.id)).all()
-    try:
-        vector_store = get_vector_store()
-        for knowledge_base in knowledge_bases:
-            vector_store.delete_by_kb(user.id, knowledge_base.id)
-        storage = get_storage()
-        for document in documents:
-            storage.delete(document.storage_key)
-    except Exception as error:
-        db.rollback()
-        raise HTTPException(503, "ACCOUNT_CLEANUP_FAILED") from error
+    cleanup_ids: list[int] = []
+    for knowledge_base in knowledge_bases:
+        cleanup_ids.append(create_cleanup_job(db, user.id, "knowledge_base", knowledge_base.id, "delete_vectors_by_kb", {}).id)
+    for document in documents:
+        cleanup_ids.append(create_cleanup_job(db, user.id, "document", document.id, "delete_storage", {"storage_key": document.storage_key}).id)
 
     quiz_ids = [quiz.id for quiz in db.scalars(select(Quiz).where(Quiz.user_id == user.id)).all()]
     db.execute(delete(Message).where(Message.user_id == user.id))
@@ -622,6 +759,7 @@ def delete_account(user: User = Depends(current_user), db: Session = Depends(db_
     user.status = "DISABLED"
     user.nickname, user.avatar_url, user.openid = "已注销用户", None, None
     db.commit()
+    dispatch_cleanup_jobs(cleanup_ids)
     return {"code": 0, "message": "ok", "data": {"deleted": True}}
 
 
@@ -652,20 +790,13 @@ def update_kb(kb_id: int, payload: KBIn, user: User = Depends(current_user), db:
 def delete_kb(kb_id: int, user: User = Depends(current_user), db: Session = Depends(db_session)):
     kb = owned(db, KnowledgeBase, kb_id, user.id)
     documents = db.scalars(select(Document).where(Document.knowledge_base_id == kb.id, Document.user_id == user.id, Document.deleted_at.is_(None))).all()
-    try:
-        get_vector_store().delete_by_kb(user.id, kb.id)
-    except Exception as error:
-        db.rollback()
-        raise HTTPException(503, "DOCUMENT_CLEANUP_FAILED") from error
+    cleanup_ids = [create_cleanup_job(db, user.id, "knowledge_base", kb.id, "delete_vectors_by_kb", {}).id]
     for document in documents:
-        try:
-            get_storage().delete(document.storage_key)
-        except Exception as error:
-            db.rollback()
-            raise HTTPException(503, "DOCUMENT_CLEANUP_FAILED") from error
+        cleanup_ids.append(create_cleanup_job(db, user.id, "document", document.id, "delete_storage", {"storage_key": document.storage_key}).id)
         document.deleted_at = datetime.utcnow(); document.status = "DELETED"
     db.execute(delete(DocumentChunk).where(DocumentChunk.knowledge_base_id == kb.id, DocumentChunk.user_id == user.id))
     kb.status = "DELETED"; db.commit()
+    dispatch_cleanup_jobs(cleanup_ids)
     return {"code": 0, "message": "ok", "data": {"deleted": True}}
 
 
@@ -724,6 +855,15 @@ async def upload_document(kb_id: int, file: UploadFile = File(...), user: User =
         raise HTTPException(415, "DOCUMENT_UNSUPPORTED")
     data = await read_upload(file)
     validate_file(data, extension, file.content_type)
+    if extension in {"txt", "md"}:
+        try:
+            decision = moderate(db, user.id, "upload", data.decode("utf-8", errors="replace"))
+        except Exception as error:
+            db.rollback()
+            raise HTTPException(503, "CONTENT_SAFETY_UNAVAILABLE") from error
+        if decision.risk == Risk.BLOCK:
+            db.commit()
+            raise HTTPException(422, "CONTENT_BLOCKED")
     digest = hashlib.sha256(data).hexdigest()
     existing = db.scalar(select(Document).where(Document.user_id == user.id, Document.knowledge_base_id == kb_id, Document.sha256 == digest, Document.deleted_at.is_(None)))
     if existing:
@@ -821,19 +961,87 @@ def get_document(document_id: int, user: User = Depends(current_user), db: Sessi
     return {"code": 0, "message": "ok", "data": document_json(owned(db, Document, document_id, user.id))}
 
 
+@app.get("/api/v1/cleanup-jobs")
+def list_cleanup_jobs(status: str | None = Query(default=None), user: User = Depends(current_user), db: Session = Depends(db_session)):
+    query = select(CleanupJob).where(CleanupJob.user_id == user.id)
+    if status:
+        query = query.where(CleanupJob.status == status.upper())
+    items = [cleanup_job_json(job) for job in db.scalars(query.order_by(CleanupJob.created_at.desc())).all()]
+    return {"code": 0, "message": "ok", "data": {"items": items, "total": len(items)}}
+
+
+@app.post("/api/v1/cleanup-jobs/{job_id}/retry")
+def retry_cleanup_job(job_id: int, user: User = Depends(current_user), db: Session = Depends(db_session)):
+    job = owned(db, CleanupJob, job_id, user.id)
+    if job.status not in {"FAILED", "RETRYING"}:
+        return {"code": 0, "message": "ok", "data": cleanup_job_json(job)}
+    job.status = "PENDING"
+    job.retry_count = 0
+    job.last_error = None
+    job.next_retry_at = None
+    db.commit()
+    dispatch_cleanup_jobs([job.id])
+    db.refresh(job)
+    return {"code": 0, "message": "ok", "data": cleanup_job_json(job)}
+
+
+class ReportIn(BaseModel):
+    target_type: str = Field(min_length=1, max_length=30)
+    target_id: int = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class ReportStatusIn(BaseModel):
+    status: str
+
+
+@app.post("/api/v1/reports")
+def create_report(payload: ReportIn, user: User = Depends(current_user), db: Session = Depends(db_session)):
+    report = UserReport(user_id=user.id, **payload.model_dump())
+    db.add(report)
+    db.commit()
+    db.refresh(report)
+    return {"code": 0, "message": "ok", "data": {"id": report.id, "status": report.status}}
+
+
+def internal_moderation_token(value: str | None) -> None:
+    expected = os.getenv("INTERNAL_MODERATION_TOKEN", "").strip()
+    if not expected or value != expected:
+        raise HTTPException(403, "MODERATION_INTERNAL_ONLY")
+
+
+@app.get("/api/v1/moderation/logs")
+def moderation_logs(x_moderation_token: str | None = Header(default=None), db: Session = Depends(db_session)):
+    internal_moderation_token(x_moderation_token)
+    items = db.scalars(select(ModerationLog).order_by(ModerationLog.created_at.desc()).limit(100)).all()
+    return {"code": 0, "message": "ok", "data": {"items": [{"id": item.id, "user_id": item.user_id, "content_type": item.content_type, "decision": item.decision, "reason": item.reason, "created_at": item.created_at.isoformat()} for item in items]}}
+
+
+@app.patch("/api/v1/reports/{report_id}")
+def update_report(report_id: int, payload: ReportStatusIn, x_moderation_token: str | None = Header(default=None), db: Session = Depends(db_session)):
+    internal_moderation_token(x_moderation_token)
+    if payload.status not in {"OPEN", "REVIEWING", "RESOLVED", "REJECTED"}:
+        raise HTTPException(422, "REPORT_STATUS_INVALID")
+    report = db.get(UserReport, report_id)
+    if not report:
+        raise HTTPException(404, "RESOURCE_NOT_FOUND")
+    report.status = payload.status
+    db.commit()
+    return {"code": 0, "message": "ok", "data": {"id": report.id, "status": report.status}}
+
+
 @app.delete("/api/v1/documents/{document_id}")
 def delete_document(document_id: int, user: User = Depends(current_user), db: Session = Depends(db_session)):
     document = owned(db, Document, document_id, user.id)
-    try:
-        get_vector_store().delete_by_document(user.id, document.id)
-        get_storage().delete(document.storage_key)
-    except Exception as error:
-        db.rollback()
-        raise HTTPException(503, "DOCUMENT_CLEANUP_FAILED") from error
+    cleanup_ids = [
+        create_cleanup_job(db, user.id, "document", document.id, "delete_vectors_by_document", {}).id,
+        create_cleanup_job(db, user.id, "document", document.id, "delete_storage", {"storage_key": document.storage_key}).id,
+    ]
     db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document.id, DocumentChunk.user_id == user.id))
     document.deleted_at = datetime.utcnow()
     document.status = "DELETED"
     db.commit()
+    dispatch_cleanup_jobs(cleanup_ids)
     return {"code": 0, "message": "ok", "data": {"deleted": True}}
 
 
@@ -900,6 +1108,14 @@ def messages(conversation_id: int, user: User = Depends(current_user), db: Sessi
 async def chat(conversation_id: int, payload: ChatIn, user: User = Depends(current_user), db: Session = Depends(db_session)):
     check_rate_limit(f"chat:{user.id}", 30)
     conversation = owned(db, Conversation, conversation_id, user.id)
+    try:
+        decision = moderate(db, user.id, "input", payload.content)
+    except Exception as error:
+        db.rollback()
+        raise HTTPException(503, "CONTENT_SAFETY_UNAVAILABLE") from error
+    if decision.risk == Risk.BLOCK:
+        db.commit()
+        raise HTTPException(422, "CONTENT_BLOCKED")
     db.add(Message(user_id=user.id, conversation_id=conversation_id, role="USER", content=payload.content)); db.flush()
     try:
         hits = await retrieve_chunks(db, user.id, conversation.knowledge_base_id, payload.content)
@@ -908,6 +1124,14 @@ async def chat(conversation_id: int, payload: ChatIn, user: User = Depends(curre
         db.rollback()
         raise HTTPException(503, "AI_PROVIDER_ERROR") from error
     answer = result["content"]
+    try:
+        output_decision = moderate(db, user.id, "output", answer)
+    except Exception as error:
+        db.rollback()
+        raise HTTPException(503, "CONTENT_SAFETY_UNAVAILABLE") from error
+    if output_decision.risk == Risk.BLOCK:
+        db.commit()
+        raise HTTPException(503, "AI_OUTPUT_BLOCKED")
     citations = []
     for index in result.get("citations", []):
         if index >= len(hits):
@@ -939,6 +1163,15 @@ async def chat_stream(websocket: WebSocket, conversation_id: int):
         if not question:
             await websocket.close(code=4400)
             return
+        safety = get_content_safety_provider()
+        input_decision = safety.check_input(question)
+        with SessionLocal() as db:
+            db.add(ModerationLog(user_id=user_id, content_type="input", decision=input_decision.risk.value, reason=input_decision.reason, content_hash=hashlib.sha256(question.encode("utf-8")).hexdigest()))
+            db.commit()
+        if input_decision.risk == Risk.BLOCK:
+            await websocket.send_json({"type": "error", "code": "CONTENT_BLOCKED"})
+            await websocket.close(code=4403)
+            return
         await websocket.send_json({"type": "retrieval_started"})
         with SessionLocal() as db:
             db.add(Message(user_id=user_id, conversation_id=conversation_id, role="USER", content=question))
@@ -954,9 +1187,17 @@ async def chat_stream(websocket: WebSocket, conversation_id: int):
         async for part in get_llm_provider().stream_chat(question, [item["chunk"].content for item in hits]):
             parts.append(part)
             await websocket.send_json({"type": "token", "content": part})
+        answer = "".join(parts)
+        output_decision = safety.check_output(answer)
+        with SessionLocal() as db:
+            db.add(ModerationLog(user_id=user_id, content_type="output", decision=output_decision.risk.value, reason=output_decision.reason, content_hash=hashlib.sha256(answer.encode("utf-8")).hexdigest()))
+            db.commit()
+        if output_decision.risk == Risk.BLOCK:
+            await websocket.send_json({"type": "error", "code": "AI_OUTPUT_BLOCKED"})
+            return
         citation_items = [{"document_id": item["chunk"].document_id, "document_name": document_names.get(item["chunk"].document_id, ""), "chunk_id": item["chunk"].id, "page_start": item["chunk"].page_start, "quote_text": item["chunk"].content[:240], "score": item["score"]} for item in hits]
         with SessionLocal() as db:
-            assistant = Message(user_id=user_id, conversation_id=conversation_id, role="ASSISTANT", content="".join(parts), citations=citation_items)
+            assistant = Message(user_id=user_id, conversation_id=conversation_id, role="ASSISTANT", content=answer, citations=citation_items)
             db.add(assistant); db.commit(); db.refresh(assistant)
             message_id = assistant.id
         for item in hits:
@@ -971,6 +1212,8 @@ async def chat_stream(websocket: WebSocket, conversation_id: int):
 async def create_plan(payload: PlanIn, user: User = Depends(current_user), db: Session = Depends(db_session)):
     check_rate_limit(f"plan:{user.id}", 10)
     owned(db, KnowledgeBase, payload.knowledge_base_id, user.id)
+    if payload.goal.strip():
+        require_safe_input(db, user.id, payload.goal)
     try:
         plan_today = datetime.now(ZoneInfo(payload.timezone)).date()
     except Exception as error:
@@ -985,6 +1228,7 @@ async def create_plan(payload: PlanIn, user: User = Depends(current_user), db: S
         generated_plan = GeneratedPlan.model_validate(generated)
     except Exception as error:
         raise HTTPException(503, "AI_PROVIDER_ERROR") from error
+    require_safe_output(db, user.id, json.dumps(generated_plan.model_dump(), ensure_ascii=False))
     values = payload.model_dump(exclude={"timezone"})
     if generated_plan.plan_name:
         values["name"] = generated_plan.plan_name
@@ -1071,25 +1315,47 @@ def refresh_plan_progress(db: Session, user_id: int, knowledge_base_id: int) -> 
 
 
 def adjust_plan_after_quiz(db: Session, user_id: int, knowledge_base_id: int, wrong_topics: list[str]) -> None:
-    if not wrong_topics:
+    mastery_rows = db.scalars(select(Mastery).where(Mastery.user_id == user_id, Mastery.knowledge_base_id == knowledge_base_id).order_by(Mastery.mastery_score)).all()
+    topics = list(dict.fromkeys([topic[:80] for topic in wrong_topics] + [row.topic[:80] for row in mastery_rows if row.mastery_score < 60]))
+    if not topics:
         return
-    topic_text = "、".join(dict.fromkeys(topic[:80] for topic in wrong_topics))[:300]
+    topic_text = "、".join(topics)[:300]
+    accuracy = sum(row.correct_count for row in mastery_rows) / max(1, sum(row.quiz_count for row in mastery_rows))
     for plan in db.scalars(select(StudyPlan).where(StudyPlan.user_id == user_id, StudyPlan.knowledge_base_id == knowledge_base_id, StudyPlan.status == "ACTIVE")).all():
         try:
             today = datetime.now(ZoneInfo(plan.timezone)).date()
         except Exception:
             continue
         tasks = db.scalars(select(StudyTask).where(StudyTask.study_plan_id == plan.id, StudyTask.user_id == user_id).order_by(StudyTask.scheduled_date, StudyTask.id)).all()
-        future = next((task for task in tasks if task.status != "DONE" and task.scheduled_date > today), None)
-        if future:
-            future.description = f"{future.description} 重点复习：{topic_text}"[:500]
+        if any(task.status != "DONE" and task.task_type == "REVIEW" and topic_text in task.description for task in tasks):
+            continue
+        overdue = [task for task in tasks if task.status != "DONE" and task.scheduled_date < today]
+        occupied = {task.scheduled_date for task in tasks}
+        for task in overdue:
+            next_date = today
+            while next_date in occupied and next_date <= plan.target_date:
+                next_date += timedelta(days=1)
+            if next_date <= plan.target_date:
+                occupied.discard(task.scheduled_date)
+                task.scheduled_date = next_date
+                occupied.add(next_date)
+        future = next((task for task in tasks if task.status != "DONE" and task.scheduled_date >= today), None)
+        if future and future.task_type not in {"REVIEW", "QUIZ"}:
+            future.task_type = "REVIEW"
+            future.title = "复习薄弱知识点"
+            future.description = f"依据掌握度与错题（准确率 {round(accuracy * 100)}%）重点复习：{topic_text}"[:500]
+            future.estimated_minutes = min(plan.daily_minutes, max(10, future.estimated_minutes))
             continue
         next_date = today + timedelta(days=1)
-        occupied = {task.scheduled_date for task in tasks}
         while next_date in occupied and next_date <= plan.target_date:
             next_date += timedelta(days=1)
         if next_date <= plan.target_date:
-            db.add(StudyTask(user_id=user_id, study_plan_id=plan.id, knowledge_base_id=knowledge_base_id, task_type="REVIEW", title="复习薄弱知识点", description=f"重点复习：{topic_text}", estimated_minutes=plan.daily_minutes, scheduled_date=next_date))
+            db.add(StudyTask(user_id=user_id, study_plan_id=plan.id, knowledge_base_id=knowledge_base_id, task_type="REVIEW", title="复习薄弱知识点", description=f"依据掌握度与错题（准确率 {round(accuracy * 100)}%）重点复习：{topic_text}", estimated_minutes=plan.daily_minutes, scheduled_date=next_date))
+            occupied.add(next_date)
+        if accuracy < 0.6 and not any(task.status != "DONE" and task.task_type == "QUIZ" for task in tasks):
+            quiz_date = next((day for day in (today + timedelta(days=offset) for offset in range(1, 8)) if day <= plan.target_date and day not in occupied), None)
+            if quiz_date:
+                db.add(StudyTask(user_id=user_id, study_plan_id=plan.id, knowledge_base_id=knowledge_base_id, task_type="QUIZ", title="薄弱知识点小测", description=f"围绕 {topic_text} 进行针对性测验。", estimated_minutes=min(20, plan.daily_minutes), scheduled_date=quiz_date))
 
 
 @app.post("/api/v1/tasks/{task_id}/complete")
@@ -1124,6 +1390,7 @@ async def create_quiz(payload: QuizIn, user: User = Depends(current_user), db: S
         raise HTTPException(503, "AI_PROVIDER_ERROR") from error
     if not generated_questions:
         raise HTTPException(503, "AI_PROVIDER_INVALID_RESPONSE")
+    require_safe_output(db, user.id, json.dumps([item.model_dump() for item in generated_questions], ensure_ascii=False))
     quiz = Quiz(user_id=user.id, knowledge_base_id=payload.knowledge_base_id, question_count=payload.question_count, max_score=payload.question_count * 20); db.add(quiz); db.flush()
     kinds = payload.question_types
     hit_by_id = {item["chunk"].id: item for item in hits}
@@ -1360,6 +1627,7 @@ def list_memories(user: User = Depends(current_user), db: Session = Depends(db_s
 
 @app.post("/api/v1/memories")
 def upsert_memory(payload: MemoryIn, user: User = Depends(current_user), db: Session = Depends(db_session)):
+    require_safe_input(db, user.id, payload.content)
     memory = db.scalar(select(UserMemory).where(UserMemory.user_id == user.id, UserMemory.memory_key == payload.memory_key))
     if memory:
         memory.memory_type, memory.content, memory.importance = payload.memory_type, payload.content, payload.importance
@@ -1371,6 +1639,7 @@ def upsert_memory(payload: MemoryIn, user: User = Depends(current_user), db: Ses
 
 @app.post("/api/v1/memories/extract")
 async def extract_memories(payload: MemoryExtractIn, user: User = Depends(current_user), db: Session = Depends(db_session)):
+    require_safe_input(db, user.id, payload.content)
     source = payload.content
     if payload.conversation_id is not None:
         owned(db, Conversation, payload.conversation_id, user.id)
@@ -1386,6 +1655,7 @@ async def extract_memories(payload: MemoryExtractIn, user: User = Depends(curren
         extracted = MemoryExtractOutput.model_validate(generated)
     except Exception as error:
         raise HTTPException(503, "AI_PROVIDER_ERROR") from error
+    require_safe_output(db, user.id, json.dumps(generated, ensure_ascii=False))
     items = []
     for memory_data in extracted.memories:
         memory = db.scalar(select(UserMemory).where(UserMemory.user_id == user.id, UserMemory.memory_key == memory_data.memory_key))

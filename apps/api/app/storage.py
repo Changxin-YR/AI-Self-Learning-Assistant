@@ -64,7 +64,10 @@ class S3Storage:
 
     def put(self, user_id: int, kb_id: int, filename: str, data: bytes) -> str:
         key = storage_key(user_id, kb_id, filename)
-        self.client.put_object(Bucket=self.bucket, Key=key, Body=data, ServerSideEncryption="AES256")
+        options = {"Bucket": self.bucket, "Key": key, "Body": data}
+        if encryption := os.getenv("S3_SERVER_SIDE_ENCRYPTION", "").strip():
+            options["ServerSideEncryption"] = encryption
+        self.client.put_object(**options)
         return key
 
     def get(self, key: str) -> bytes:
