@@ -19,7 +19,7 @@ WECHAT_RELEASE_GATE = BLOCKED_EXTERNAL
 ## 2. 修改统计
 
 - 本轮提交：`3c4bcc7`、`777efe9`、`c6a1adb`、`f7b8db9`，以及本报告文档提交。
-- 相对基线修改文件：24 个；新增代码约 1,183 行，删除 76 行。
+- 相对基线代码/门禁修改文件：24 个；新增代码约 1,183 行，删除 76 行；交付文档 3 个，合计 27 个文件。
 - 测试：全量 49 条通过；新增 Cleanup 投递失败、内容安全输入/输出和生产 Provider 覆盖。
 - 数据库迁移：`0006_cleanup_jobs`、`0007_content_safety`。
 - 未删除既有失败测试；未提交 `tmp-build-log.json`。
@@ -109,7 +109,7 @@ WECHAT_RELEASE_GATE = BLOCKED_EXTERNAL
 ## 10. Git
 
 - Branch：`audit/wechat-release-gates-20260907`
-- Commits：`3c4bcc7`、`777efe9`、`c6a1adb`、`f7b8db9`，报告文档随后提交。
+- Commits：`3c4bcc7`、`777efe9`、`c6a1adb`、`f7b8db9`、`fcff0ba`。
 - PR：继续现有 Draft PR #1，未创建第二个 PR。
 - CI：`ci.yml` 保留 push/PR 基础检查；`release-gate.yml` 为 `workflow_dispatch`，包含测试、迁移、production-like E2E、编译、ruff、Vue build、原生 JS 和微信代码门禁。
 
