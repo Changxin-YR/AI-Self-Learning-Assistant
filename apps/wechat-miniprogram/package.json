@@ -1,0 +1,7 @@
+{
+  "name": "study-agent-wechat-miniprogram",
+  "private": true,
+  "scripts": {
+    "build:wechat:production": "node ../../scripts/build_wechat_production.mjs"
+  }
+}
