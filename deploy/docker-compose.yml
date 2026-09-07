@@ -39,8 +39,10 @@ services:
     environment:
       DATABASE_URL: mysql+pymysql://study_agent:change-me@mysql:3306/study_agent
       DEV_MODE: "false"
+      STORAGE_PROVIDER: s3
+      VECTOR_PROVIDER: qdrant
     command: ["celery", "-A", "app.worker.celery_app", "worker", "-Q", "documents", "--loglevel=info"]
-    depends_on: [api, redis]
+    depends_on: [api, redis, qdrant, minio]
 volumes:
   mysql_data:
   qdrant_data:
