@@ -8,3 +8,4 @@ study-agent-home.png
 apps/miniprogram/node_modules/
 apps/miniprogram/dist/
 .pytest_cache/
+apps/wechat-miniprogram/project.private.config.json
