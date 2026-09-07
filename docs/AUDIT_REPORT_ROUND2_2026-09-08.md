@@ -109,7 +109,7 @@ WECHAT_RELEASE_GATE = BLOCKED_EXTERNAL
 ## 10. Git
 
 - Branch：`audit/wechat-release-gates-20260907`
-- Commits：`3c4bcc7`、`777efe9`、`c6a1adb`、`f7b8db9`、`fcff0ba`、`e78ddc5`、`a1035f5`。
+- Commits：`3c4bcc7`、`777efe9`、`c6a1adb`、`f7b8db9`、`fcff0ba`、`e78ddc5`、`a1035f5`、`e12fdc3`。
 - PR：继续现有 Draft PR #1，未创建第二个 PR。
 - CI：`ci.yml` 保留 push/PR 基础检查；`release-gate.yml` 为 `workflow_dispatch`，包含测试、迁移、production-like E2E、编译、ruff、Vue build、原生 JS 和微信代码门禁。
 
