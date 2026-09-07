@@ -442,6 +442,24 @@ def test_cleanup_dispatch_failure_keeps_committed_job_retryable(monkeypatch):
         assert job and job.status == "RETRYING" and job.last_error == "CLEANUP_QUEUE_UNAVAILABLE"
 
 
+def test_cleanup_worker_recovers_stale_processing_job(monkeypatch):
+    from app.main import CleanupJob, SessionLocal
+    from app.worker import process_cleanup_job_sync
+
+    token = login("cleanup-stale")
+    kb = make_kb(token)
+    document = upload(token, kb["id"], "Worker 中途异常后恢复。")
+    assert client.delete(f"/api/v1/documents/{document['id']}", headers=auth(token)).status_code == 200
+    with SessionLocal() as db:
+        job = db.scalar(__import__("sqlalchemy").select(CleanupJob).where(CleanupJob.resource_id == document["id"], CleanupJob.operation == "delete_storage"))
+        job.status = "PROCESSING"
+        job.updated_at = __import__("datetime").datetime.utcnow() - __import__("datetime").timedelta(seconds=60)
+        db.commit()
+        job_id = job.id
+    monkeypatch.setattr("app.worker.CLEANUP_PROCESSING_TIMEOUT_SECONDS", 30)
+    assert process_cleanup_job_sync(job_id)["status"] == "SUCCEEDED"
+
+
 def test_memory_extract_uses_structured_provider_and_user_scope(monkeypatch):
     class Provider:
         async def structured_output(self, instruction, schema, contexts):

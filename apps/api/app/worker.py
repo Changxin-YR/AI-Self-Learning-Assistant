@@ -90,6 +90,7 @@ def process_document_sync(document_id: int) -> dict[str, str]:
 
 
 CLEANUP_MAX_RETRIES = max(1, int(os.getenv("CLEANUP_MAX_RETRIES", "5")))
+CLEANUP_PROCESSING_TIMEOUT_SECONDS = max(30, int(os.getenv("CLEANUP_PROCESSING_TIMEOUT_SECONDS", "300")))
 
 
 def process_cleanup_job_sync(job_id: int) -> dict[str, str | int]:
@@ -105,7 +106,12 @@ def process_cleanup_job_sync(job_id: int) -> dict[str, str | int]:
         if job.status == "SUCCEEDED":
             return {"status": "SUCCEEDED", "job_id": job.id}
         if job.status == "PROCESSING":
-            return {"status": "PROCESSING", "job_id": job.id}
+            processing_age = datetime.utcnow() - (job.updated_at or datetime.utcnow())
+            if processing_age.total_seconds() <= CLEANUP_PROCESSING_TIMEOUT_SECONDS:
+                return {"status": "PROCESSING", "job_id": job.id}
+            job.status = "RETRYING"
+            job.next_retry_at = None
+            db.commit()
         if job.status == "RETRYING" and job.next_retry_at and job.next_retry_at > datetime.utcnow():
             return {"status": "RETRYING", "job_id": job.id}
         claimed = db.query(CleanupJob).filter(CleanupJob.id == job.id, CleanupJob.status.in_({"PENDING", "RETRYING"})).update({"status": "PROCESSING", "updated_at": datetime.utcnow()}, synchronize_session=False)
