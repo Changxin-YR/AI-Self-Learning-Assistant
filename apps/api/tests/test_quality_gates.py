@@ -372,6 +372,7 @@ def test_cleanup_jobs_are_user_scoped_and_qdrant_retryable(monkeypatch):
     from app import main
 
     token_a, token_b = login("cleanup-a"), login("cleanup-b")
+    user_a_id = client.get("/api/v1/auth/profile", headers=auth(token_a)).json()["data"]["id"]
     kb_a = make_kb(token_a, "A")
     document = upload(token_a, kb_a["id"], "A 的向量资料。")
 
@@ -383,10 +384,10 @@ def test_cleanup_jobs_are_user_scoped_and_qdrant_retryable(monkeypatch):
     monkeypatch.setattr("app.vector_store.get_vector_store", lambda: BrokenVector())
     assert client.delete(f"/api/v1/documents/{document['id']}", headers=auth(token_a)).status_code == 200
     jobs_a = client.get("/api/v1/cleanup-jobs", headers=auth(token_a)).json()["data"]["items"]
-    assert jobs_a and all(item["user_id"] == 1 or item["resource_id"] == document["id"] for item in jobs_a)
+    assert jobs_a and all(item["user_id"] == user_a_id for item in jobs_a)
     assert client.get("/api/v1/cleanup-jobs", headers=auth(token_b)).json()["data"]["items"] == []
     with SessionLocal() as db:
-        assert db.query(CleanupJob).filter(CleanupJob.user_id != document.get("user_id", 0)).count() >= 1
+        assert db.query(CleanupJob).filter(CleanupJob.user_id == user_a_id).count() >= 1
 
 
 def test_cleanup_job_reaches_failed_after_bounded_retries(monkeypatch):
@@ -476,19 +477,20 @@ def test_adaptive_plan_is_bounded_and_prioritizes_repeated_wrong_answers():
     from app.main import Mastery, StudyTask, WrongQuestion, adjust_plan_after_quiz
 
     token = login("adaptive-bounded")
+    user_id = client.get("/api/v1/auth/profile", headers=auth(token)).json()["data"]["id"]
     kb = make_kb(token)
     upload(token, kb["id"], "自适应复习资料。")
     plan = client.post("/api/v1/study-plans", headers=auth(token), json={"name": "自适应", "knowledge_base_id": kb["id"], "target_date": (date.today() + timedelta(days=4)).isoformat(), "daily_minutes": 40}).json()["data"]
     client.post(f"/api/v1/study-plans/{plan['id']}/activate", headers=auth(token))
     with SessionLocal() as db:
-        mastery = Mastery(user_id=1, knowledge_base_id=kb["id"], topic="薄弱主题", mastery_score=20, quiz_count=4, correct_count=1)
+        mastery = Mastery(user_id=user_id, knowledge_base_id=kb["id"], topic="薄弱主题", mastery_score=20, quiz_count=4, correct_count=1)
         db.add(mastery)
-        db.add(WrongQuestion(user_id=1, question_id=999, knowledge_base_id=kb["id"], wrong_count=4))
+        db.add(WrongQuestion(user_id=user_id, question_id=999, knowledge_base_id=kb["id"], wrong_count=4))
         db.commit()
-        adjust_plan_after_quiz(db, 1, kb["id"], ["薄弱主题"])
+        adjust_plan_after_quiz(db, user_id, kb["id"], ["薄弱主题"])
         db.commit()
         first = db.query(StudyTask).filter(StudyTask.study_plan_id == plan["id"], StudyTask.task_type == "REVIEW").count()
-        adjust_plan_after_quiz(db, 1, kb["id"], ["薄弱主题"])
+        adjust_plan_after_quiz(db, user_id, kb["id"], ["薄弱主题"])
         db.commit()
         second = db.query(StudyTask).filter(StudyTask.study_plan_id == plan["id"], StudyTask.task_type == "REVIEW").count()
         assert first == second == 1
