@@ -1,0 +1,10 @@
+[project]
+name = "study-agent-api"
+version = "1.0.0"
+requires-python = ">=3.12"
+dependencies = ["fastapi", "uvicorn", "sqlalchemy", "pydantic", "python-multipart", "itsdangerous", "alembic"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+

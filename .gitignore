@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+*.db
+apps/api/uploads/
+apps/api/study-agent-home.png
+study-agent-home.png
+apps/miniprogram/node_modules/
+apps/miniprogram/dist/
+.pytest_cache/

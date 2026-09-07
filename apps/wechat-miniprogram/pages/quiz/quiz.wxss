@@ -1,0 +1,1 @@
+.question { margin-bottom:20rpx; } .option { padding:20rpx; border:1rpx solid #e5e7ed; border-radius:14rpx; margin-top:12rpx; font-size:25rpx; } .option.selected { color:#5b6cff; border-color:#5b6cff; background:#f1f2ff; }

@@ -1,0 +1,1 @@
+.welcome { margin-bottom:36rpx; } .greeting { display:block; font-size:56rpx; font-weight:600; margin-bottom:8rpx; }

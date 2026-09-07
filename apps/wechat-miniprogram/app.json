@@ -1,0 +1,31 @@
+{
+  "pages": [
+    "pages/home/home",
+    "pages/library/library",
+    "pages/learning/learning",
+    "pages/profile/profile",
+    "pages/chat/chat",
+    "pages/quiz/quiz"
+  ],
+  "window": {
+    "navigationBarTitleText": "StudyAgent",
+    "navigationBarBackgroundColor": "#f7f8fa",
+    "navigationBarTextStyle": "black",
+    "backgroundColor": "#f7f8fa"
+  },
+  "tabBar": {
+    "color": "#969aa5",
+    "selectedColor": "#5b6cff",
+    "backgroundColor": "#ffffff",
+    "borderStyle": "white",
+    "list": [
+      { "pagePath": "pages/home/home", "text": "首页" },
+      { "pagePath": "pages/library/library", "text": "知识库" },
+      { "pagePath": "pages/learning/learning", "text": "学习" },
+      { "pagePath": "pages/profile/profile", "text": "我的" }
+    ]
+  },
+  "style": "v2",
+  "__usePrivacyCheck__": true,
+  "sitemapLocation": "sitemap.json"
+}
