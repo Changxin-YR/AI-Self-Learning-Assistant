@@ -1070,6 +1070,28 @@ def refresh_plan_progress(db: Session, user_id: int, knowledge_base_id: int) -> 
         plan.progress_percent = round(sum(task.status == "DONE" for task in tasks) / max(1, len(tasks)) * 100)
 
 
+def adjust_plan_after_quiz(db: Session, user_id: int, knowledge_base_id: int, wrong_topics: list[str]) -> None:
+    if not wrong_topics:
+        return
+    topic_text = "、".join(dict.fromkeys(topic[:80] for topic in wrong_topics))[:300]
+    for plan in db.scalars(select(StudyPlan).where(StudyPlan.user_id == user_id, StudyPlan.knowledge_base_id == knowledge_base_id, StudyPlan.status == "ACTIVE")).all():
+        try:
+            today = datetime.now(ZoneInfo(plan.timezone)).date()
+        except Exception:
+            continue
+        tasks = db.scalars(select(StudyTask).where(StudyTask.study_plan_id == plan.id, StudyTask.user_id == user_id).order_by(StudyTask.scheduled_date, StudyTask.id)).all()
+        future = next((task for task in tasks if task.status != "DONE" and task.scheduled_date > today), None)
+        if future:
+            future.description = f"{future.description} 重点复习：{topic_text}"[:500]
+            continue
+        next_date = today + timedelta(days=1)
+        occupied = {task.scheduled_date for task in tasks}
+        while next_date in occupied and next_date <= plan.target_date:
+            next_date += timedelta(days=1)
+        if next_date <= plan.target_date:
+            db.add(StudyTask(user_id=user_id, study_plan_id=plan.id, knowledge_base_id=knowledge_base_id, task_type="REVIEW", title="复习薄弱知识点", description=f"重点复习：{topic_text}", estimated_minutes=plan.daily_minutes, scheduled_date=next_date))
+
+
 @app.post("/api/v1/tasks/{task_id}/complete")
 def complete_task(task_id: int, user: User = Depends(current_user), db: Session = Depends(db_session)):
     task = owned(db, StudyTask, task_id, user.id)
@@ -1172,6 +1194,7 @@ def submit_quiz(quiz_id: int, payload: AnswersIn, user: User = Depends(current_u
     db.commit()
     try:
         score = 0
+        wrong_topics = []
         for question_id, q in questions.items():
             given = submitted.get(question_id, [])
             if q.question_type == "SHORT":
@@ -1184,6 +1207,7 @@ def submit_quiz(quiz_id: int, payload: AnswersIn, user: User = Depends(current_u
             score += points
             db.add(QuizAnswer(quiz_id=quiz.id, question_id=q.id, user_id=user.id, answer=given, is_correct=is_correct, score=points, ai_feedback=feedback))
             if not is_correct:
+                wrong_topics.append(q.question)
                 wrong = db.scalar(select(WrongQuestion).where(WrongQuestion.user_id == user.id, WrongQuestion.question_id == q.id))
                 if wrong:
                     wrong.wrong_count += 1; wrong.last_wrong_at = datetime.utcnow(); wrong.mastered = False
@@ -1194,6 +1218,7 @@ def submit_quiz(quiz_id: int, payload: AnswersIn, user: User = Depends(current_u
             if not mastery:
                 mastery = Mastery(user_id=user.id, knowledge_base_id=quiz.knowledge_base_id, topic=topic, mastery_score=50); db.add(mastery); db.flush()
             mastery.quiz_count += 1; mastery.correct_count += int(is_correct); mastery.last_reviewed_at = datetime.utcnow(); mastery.mastery_score = max(0, min(100, mastery.mastery_score + (6 if is_correct else -8)))
+        adjust_plan_after_quiz(db, user.id, quiz.knowledge_base_id, wrong_topics)
         refresh_plan_progress(db, user.id, quiz.knowledge_base_id)
         quiz.status = "SUBMITTED"; quiz.score = score; quiz.max_score = sum(q.score_value for q in questions.values()); quiz.submitted_at = datetime.utcnow(); db.commit()
     except Exception as error:

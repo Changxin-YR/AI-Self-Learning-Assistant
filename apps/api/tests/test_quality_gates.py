@@ -335,3 +335,18 @@ def test_memory_extract_uses_structured_provider_and_user_scope(monkeypatch):
     assert response.json()["data"]["items"][0]["memory_key"] == "study_style"
     other = login("memory-extract-other")
     assert client.get("/api/v1/memories", headers=auth(other)).json()["data"]["items"] == []
+
+
+def test_quiz_errors_adjust_follow_up_plan_task():
+    from app.main import StudyPlan, StudyTask
+
+    token = login("adaptive-plan")
+    kb = make_kb(token)
+    upload(token, kb["id"], "后续复习需要围绕核心结论。")
+    plan = client.post("/api/v1/study-plans", headers=auth(token), json={"name": "自适应计划", "knowledge_base_id": kb["id"], "target_date": (date.today() + timedelta(days=3)).isoformat()}).json()["data"]
+    client.post(f"/api/v1/study-plans/{plan['id']}/activate", headers=auth(token))
+    quiz = client.post("/api/v1/quizzes", headers=auth(token), json={"knowledge_base_id": kb["id"], "question_count": 5}).json()["data"]
+    assert client.post(f"/api/v1/quizzes/{quiz['id']}/submit", headers=auth(token), json={"answers": []}).status_code == 200
+    with SessionLocal() as db:
+        assert db.query(StudyPlan).filter(StudyPlan.id == plan["id"], StudyPlan.progress_percent >= 0).count() == 1
+        assert any("重点复习" in task.description for task in db.query(StudyTask).filter(StudyTask.study_plan_id == plan["id"]).all())
