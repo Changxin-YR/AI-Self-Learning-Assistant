@@ -19,7 +19,7 @@ WECHAT_RELEASE_GATE = BLOCKED_EXTERNAL
 ## 2. 修改统计
 
 - 本轮提交：cleanup/safety、production-like E2E、微信构建和报告文档均按模块提交，完整历史见 `git log 8a412c5..HEAD`。
-- 相对基线代码/门禁修改文件：24 个；新增代码约 1,183 行，删除 76 行；交付文档 3 个，合计 27 个文件。
+- 相对基线代码/门禁修改文件：24 个；新增代码约 1,209 行，删除 76 行；交付文档 3 个，合计 27 个文件。
 - 测试：全量 50 条通过；新增 Cleanup 投递失败/过期 claim、内容安全输入/输出和生产 Provider 覆盖。
 - 数据库迁移：`0006_cleanup_jobs`、`0007_content_safety`。
 - 未删除既有失败测试；未提交 `tmp-build-log.json`。
