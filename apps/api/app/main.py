@@ -1318,6 +1318,15 @@ class MemoryIn(BaseModel):
     importance: int = Field(default=1, ge=1, le=5)
 
 
+class MemoryExtractIn(BaseModel):
+    content: str = Field(min_length=1, max_length=4000)
+    conversation_id: int | None = Field(default=None, ge=1)
+
+
+class MemoryExtractOutput(BaseModel):
+    memories: list[MemoryIn] = Field(default_factory=list, max_length=20)
+
+
 @app.get("/api/v1/memories")
 def list_memories(user: User = Depends(current_user), db: Session = Depends(db_session)):
     items = db.scalars(select(UserMemory).where(UserMemory.user_id == user.id, (UserMemory.expires_at.is_(None) | (UserMemory.expires_at > datetime.utcnow()))).order_by(UserMemory.updated_at.desc())).all()
@@ -1333,6 +1342,37 @@ def upsert_memory(payload: MemoryIn, user: User = Depends(current_user), db: Ses
         memory = UserMemory(user_id=user.id, **payload.model_dump()); db.add(memory)
     db.commit(); db.refresh(memory)
     return {"code": 0, "message": "ok", "data": {"id": memory.id, "memory_type": memory.memory_type, "memory_key": memory.memory_key, "content": memory.content, "importance": memory.importance}}
+
+
+@app.post("/api/v1/memories/extract")
+async def extract_memories(payload: MemoryExtractIn, user: User = Depends(current_user), db: Session = Depends(db_session)):
+    source = payload.content
+    if payload.conversation_id is not None:
+        owned(db, Conversation, payload.conversation_id, user.id)
+        messages = db.scalars(select(Message).where(Message.conversation_id == payload.conversation_id, Message.user_id == user.id).order_by(Message.created_at.desc()).limit(10)).all()
+        source = "\n".join(f"{message.role}: {message.content}" for message in reversed(messages))
+    schema = MemoryExtractOutput.model_json_schema()
+    try:
+        generated = await get_llm_provider().structured_output(
+            "从输入中抽取可长期保存的学习目标、学习偏好、薄弱知识领域或当前计划状态。禁止保存密码、Token、API Key、敏感信息或短期答题内容；没有合适内容时返回空数组。",
+            schema,
+            [source],
+        )
+        extracted = MemoryExtractOutput.model_validate(generated)
+    except Exception as error:
+        raise HTTPException(503, "AI_PROVIDER_ERROR") from error
+    items = []
+    for memory_data in extracted.memories:
+        memory = db.scalar(select(UserMemory).where(UserMemory.user_id == user.id, UserMemory.memory_key == memory_data.memory_key))
+        if memory:
+            memory.memory_type, memory.content, memory.importance, memory.source = memory_data.memory_type, memory_data.content, memory_data.importance, "agent-memory-extract"
+        else:
+            memory = UserMemory(user_id=user.id, source="agent-memory-extract", **memory_data.model_dump())
+            db.add(memory)
+        db.flush()
+        items.append({"id": memory.id, "memory_type": memory.memory_type, "memory_key": memory.memory_key, "content": memory.content, "importance": memory.importance})
+    db.commit()
+    return {"code": 0, "message": "ok", "data": {"items": items}}
 
 
 @app.get("/api/v1/memories/relevant")

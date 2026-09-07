@@ -319,3 +319,19 @@ def test_account_deletion_cleans_user_data_and_storage():
         assert db.query(Message).filter(Message.conversation_id == conversation["id"]).count() == 0
         assert db.query(UserMemory).filter(UserMemory.memory_key == "delete").count() == 0
         assert db.query(User).filter(User.id == user_id, User.status == "DISABLED", User.nickname == "已注销用户").count() == 1
+
+
+def test_memory_extract_uses_structured_provider_and_user_scope(monkeypatch):
+    class Provider:
+        async def structured_output(self, instruction, schema, contexts):
+            return {"memories": [{"memory_type": "preference", "memory_key": "study_style", "content": "偏好晚间学习", "importance": 3}]}
+
+    from app import main
+
+    monkeypatch.setattr(main, "get_llm_provider", lambda: Provider())
+    token = login("memory-extract")
+    response = client.post("/api/v1/memories/extract", headers=auth(token), json={"content": "我偏好晚间学习。"})
+    assert response.status_code == 200
+    assert response.json()["data"]["items"][0]["memory_key"] == "study_style"
+    other = login("memory-extract-other")
+    assert client.get("/api/v1/memories", headers=auth(other)).json()["data"]["items"] == []

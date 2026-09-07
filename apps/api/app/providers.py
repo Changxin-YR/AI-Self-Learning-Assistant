@@ -45,6 +45,8 @@ class FakeLLMProvider:
         source = contexts[0][:240] if contexts else ""
         if "学习计划" in instruction:
             return {"plan_name": "资料学习计划", "summary": "根据当前资料安排循序学习。", "days": [{"date": "", "goal": "掌握资料核心内容", "estimated_minutes": 30, "tasks": [{"type": "LEARN_POINT", "title": "学习资料核心内容", "estimated_minutes": 30}]}]}
+        if "长期保存" in instruction:
+            return {"memories": []}
         return {"questions": [{
             "question_type": "SINGLE",
             "question": "根据资料，下面哪项最准确地概括了这段内容？",
