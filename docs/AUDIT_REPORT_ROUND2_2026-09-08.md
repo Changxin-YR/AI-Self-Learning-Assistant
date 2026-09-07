@@ -18,9 +18,9 @@ WECHAT_RELEASE_GATE = BLOCKED_EXTERNAL
 
 ## 2. 修改统计
 
-- 本轮提交：`3c4bcc7`、`777efe9`、`c6a1adb`、`f7b8db9`，以及本报告文档提交。
+- 本轮提交：cleanup/safety、production-like E2E、微信构建和报告文档均按模块提交，完整历史见 `git log 8a412c5..HEAD`。
 - 相对基线代码/门禁修改文件：24 个；新增代码约 1,183 行，删除 76 行；交付文档 3 个，合计 27 个文件。
-- 测试：全量 49 条通过；新增 Cleanup 投递失败、内容安全输入/输出和生产 Provider 覆盖。
+- 测试：全量 50 条通过；新增 Cleanup 投递失败/过期 claim、内容安全输入/输出和生产 Provider 覆盖。
 - 数据库迁移：`0006_cleanup_jobs`、`0007_content_safety`。
 - 未删除既有失败测试；未提交 `tmp-build-log.json`。
 
@@ -33,7 +33,7 @@ WECHAT_RELEASE_GATE = BLOCKED_EXTERNAL
 | F-009~F-011 | P0 | 登录竞态、首页入口/任务伪造 | 前端启动与数据绑定不完整 | auth promise/401 重试、点击项绑定、空数据真实展示 | 原生 JS 检查、后端回归 | PASS |
 | F-012~F-015 | P1 | 计划重复激活、未答题、简答评分和解析缺失 | 状态和评分模型不完整 | 唯一约束/幂等激活、未答记错、Rubric 评分、逐题结果 | Quiz/Plan 测试、E2E | PASS |
 | F-016~F-018 | P1 | 会话历史、Citation、流式能力缺口 | 原生端未接完整历史/引用 | 会话列表/删除/恢复、多 Citation；REST 保持真实非伪流式，WebSocket 保留 token 流 | 原生 JS 检查、API 测试 | PASS |
-| F-019~F-021 | P1 | 文档状态、重建和跨服务删除不可靠 | 外部资源删除为 best-effort | `cleanup_jobs` 持久化、状态/重试/人工 retry、Storage/Qdrant 用户隔离；删除先提交 DB 再投递 | Cleanup 失败、重试、隔离、投递失败、E2E | PASS |
+| F-019~F-021 | P1 | 文档状态、重建和跨服务删除不可靠 | 外部资源删除为 best-effort | `cleanup_jobs` 持久化、状态/重试/人工 retry、过期 PROCESSING claim 恢复、Storage/Qdrant 用户隔离；删除先提交 DB 再投递 | Cleanup 失败、重试、隔离、投递失败、过期 claim、E2E | PASS |
 | F-022~F-025 | P1 | 文件攻击面、readiness、CORS、JWT 风险 | 校验和生产配置不足 | 流式大小限制、MIME/魔数/ZIP 防护、真实依赖探测、CORS/JWT fail-fast | 质量门禁和 Provider 测试 | PASS |
 | F-026~F-030 | P1 | Profile 假入口、长期记忆和原生功能缺口 | 页面与后端能力未闭环 | 真实隐私/AI 说明与删除入口、结构化 Memory CRUD/抽取/召回、六页功能保留 | 原生 JS 检查、Memory/IDOR 测试 | PASS |
 | R-007 | P1 | 内容安全未闭环 | 仅依赖模型自拒答 | 可替换 Provider、输入/输出/上传审核、PASS/REVIEW/BLOCK、日志、举报和内部审核 API | `test_safety.py` | PASS（代码侧） |
@@ -42,7 +42,7 @@ WECHAT_RELEASE_GATE = BLOCKED_EXTERNAL
 
 | 命令 | 结果 |
 |---|---|
-| `pytest -q apps/api/tests` | 49 passed，0 failed |
+| `pytest -q apps/api/tests` | 50 passed，0 failed |
 | `ruff check --select F apps/api/app apps/api/tests scripts` | PASS |
 | `python -m compileall -q apps/api scripts` | PASS |
 | `alembic upgrade head` | PASS |
@@ -109,7 +109,7 @@ WECHAT_RELEASE_GATE = BLOCKED_EXTERNAL
 ## 10. Git
 
 - Branch：`audit/wechat-release-gates-20260907`
-- Commits：`3c4bcc7`、`777efe9`、`c6a1adb`、`f7b8db9`、`fcff0ba`、`e78ddc5`、`a1035f5`、`e12fdc3`。
+- Commits：按模块提交；基线到当前的完整列表以 `git log 8a412c5..HEAD` 为准。
 - PR：继续现有 Draft PR #1，未创建第二个 PR。
 - CI：`ci.yml` 保留 push/PR 基础检查；`release-gate.yml` 为 `workflow_dispatch`，包含测试、迁移、production-like E2E、编译、ruff、Vue build、原生 JS 和微信代码门禁。
 
