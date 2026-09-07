@@ -297,3 +297,25 @@ def test_invalid_jwt_payload_returns_401():
     import jwt
     token = jwt.encode({"user_id": {}}, "dev-only-change-me-please-32-chars", algorithm="HS256")
     assert client.get("/api/v1/auth/profile", headers=auth(token)).status_code == 401
+
+
+def test_account_deletion_cleans_user_data_and_storage():
+    from app.main import Conversation, Document, KnowledgeBase, Message, User, UserMemory
+
+    token = login("delete-account")
+    user_id = client.get("/api/v1/auth/profile", headers=auth(token)).json()["data"]["id"]
+    kb = make_kb(token)
+    document = upload(token, kb["id"], "账号删除后不应保留的资料。")
+    conversation = client.post("/api/v1/conversations", headers=auth(token), json={"knowledge_base_id": kb["id"]}).json()["data"]
+    client.post(f"/api/v1/conversations/{conversation['id']}/messages", headers=auth(token), json={"content": "资料是什么？"})
+    client.post("/api/v1/memories", headers=auth(token), json={"memory_type": "goal", "memory_key": "delete", "content": "待删除"})
+
+    assert client.delete("/api/v1/auth/account", headers=auth(token)).status_code == 200
+    assert client.get("/api/v1/auth/profile", headers=auth(token)).status_code == 401
+    with SessionLocal() as db:
+        assert db.query(KnowledgeBase).filter(KnowledgeBase.user_id == user_id).count() == 0
+        assert db.query(Document).filter(Document.id == document["id"]).count() == 0
+        assert db.query(Conversation).filter(Conversation.id == conversation["id"]).count() == 0
+        assert db.query(Message).filter(Message.conversation_id == conversation["id"]).count() == 0
+        assert db.query(UserMemory).filter(UserMemory.memory_key == "delete").count() == 0
+        assert db.query(User).filter(User.id == user_id, User.status == "DISABLED", User.nickname == "已注销用户").count() == 1

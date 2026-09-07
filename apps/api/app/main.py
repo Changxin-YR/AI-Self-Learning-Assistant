@@ -589,7 +589,38 @@ def profile(user: User = Depends(current_user)):
 
 @app.delete("/api/v1/auth/account")
 def delete_account(user: User = Depends(current_user), db: Session = Depends(db_session)):
+    knowledge_bases = db.scalars(select(KnowledgeBase).where(KnowledgeBase.user_id == user.id)).all()
+    documents = db.scalars(select(Document).where(Document.user_id == user.id)).all()
+    try:
+        vector_store = get_vector_store()
+        for knowledge_base in knowledge_bases:
+            vector_store.delete_by_kb(user.id, knowledge_base.id)
+        storage = get_storage()
+        for document in documents:
+            storage.delete(document.storage_key)
+    except Exception as error:
+        db.rollback()
+        raise HTTPException(503, "ACCOUNT_CLEANUP_FAILED") from error
+
+    quiz_ids = [quiz.id for quiz in db.scalars(select(Quiz).where(Quiz.user_id == user.id)).all()]
+    db.execute(delete(Message).where(Message.user_id == user.id))
+    db.execute(delete(Conversation).where(Conversation.user_id == user.id))
+    if quiz_ids:
+        db.execute(delete(QuizAnswer).where(QuizAnswer.user_id == user.id, QuizAnswer.quiz_id.in_(quiz_ids)))
+        db.execute(delete(QuizQuestion).where(QuizQuestion.user_id == user.id, QuizQuestion.quiz_id.in_(quiz_ids)))
+    db.execute(delete(Quiz).where(Quiz.user_id == user.id))
+    db.execute(delete(WrongQuestion).where(WrongQuestion.user_id == user.id))
+    db.execute(delete(Mastery).where(Mastery.user_id == user.id))
+    db.execute(delete(StudyTask).where(StudyTask.user_id == user.id))
+    db.execute(delete(StudyPlan).where(StudyPlan.user_id == user.id))
+    db.execute(delete(AgentToolCall).where(AgentToolCall.user_id == user.id))
+    db.execute(delete(AgentRun).where(AgentRun.user_id == user.id))
+    db.execute(delete(UserMemory).where(UserMemory.user_id == user.id))
+    db.execute(delete(DocumentChunk).where(DocumentChunk.user_id == user.id))
+    db.execute(delete(Document).where(Document.user_id == user.id))
+    db.execute(delete(KnowledgeBase).where(KnowledgeBase.user_id == user.id))
     user.status = "DISABLED"
+    user.nickname, user.avatar_url, user.openid = "已注销用户", None, None
     db.commit()
     return {"code": 0, "message": "ok", "data": {"deleted": True}}
 
