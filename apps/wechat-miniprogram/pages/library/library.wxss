@@ -1,1 +1,11 @@
 .detail { margin-bottom:30rpx; }
+.detail-tabs { display:flex; gap:8rpx; background:#f5f6fa; padding:8rpx; border-radius:18rpx; margin:28rpx 0 20rpx; }
+.detail-tab { flex:1; margin:0; padding:18rpx 8rpx; border-radius:14rpx; background:transparent; color:#7f8695; font-size:24rpx; line-height:1; }
+.detail-tab::after { border:0; }
+.detail-tab.active { background:#fff; color:#111318; font-weight:600; box-shadow:0 4rpx 14rpx rgba(17,19,24,.05); }
+.mastery-row,.history-link { display:flex; align-items:center; gap:18rpx; padding:22rpx 0; border-bottom:1rpx solid #f0f1f4; }
+.mastery-row:last-child,.history-link:last-child { border-bottom:0; }
+.mastery-row .main,.history-link text:first-child { flex:1; }
+.mastery-row text { display:block; }
+.mastery-score { color:#5B5FF6; font-size:28rpx; font-weight:600; }
+.history-link { font-size:26rpx; }
