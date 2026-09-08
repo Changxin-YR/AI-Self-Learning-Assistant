@@ -4,6 +4,7 @@ const EMPTY_FORM = { name: '', description: '', category: '课程', icon: '📘'
 Page({
   data: { loading: true, error: '', detailError: '', libraries: [], visibleLibraries: [], query: '', selected: null, documents: [], modal: false, editing: false, form: { ...EMPTY_FORM }, uploading: false, categories: ['课程', '考试', '技术', '其他'] },
   onShow() {
+    if (getApp().globalData.signedOut) { this.stopPolling(); wx.switchTab({ url: '/pages/home/home' }); return }
     this.load().then(() => {
       if (this.data.selected) this.startPolling(this.data.selected.id)
     })
