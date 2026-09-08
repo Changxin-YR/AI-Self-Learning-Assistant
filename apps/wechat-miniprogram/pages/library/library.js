@@ -6,7 +6,7 @@ Page({
   onShow() {
     if (getApp().globalData.signedOut) { this.stopPolling(); wx.switchTab({ url: '/pages/home/home' }); return }
     this.load().then(() => {
-      if (this.data.selected) this.startPolling(this.data.selected.id)
+      if (this.data.selected && this.data.detailTab === 'documents') this.startPolling(this.data.selected.id)
     })
   },
   onHide() { this.stopPolling() },
@@ -20,7 +20,7 @@ Page({
     this.stopPolling()
     const generation = this.pollGeneration
     this.pollTimer = setInterval(() => {
-      if (!this.data.selected || this.data.selected.id !== kbId || generation !== this.pollGeneration || this.pollInFlight) return
+      if (this.data.detailTab !== 'documents' || !this.data.selected || this.data.selected.id !== kbId || generation !== this.pollGeneration || this.pollInFlight) return
       this.pollInFlight = true
       this.loadDocuments(kbId, generation).finally(() => { this.pollInFlight = false })
     }, 5000)
@@ -110,8 +110,10 @@ Page({
   async switchDetailTab(event) {
     const tab = event.currentTarget.dataset.tab
     if (!['documents', 'mastery', 'history'].includes(tab)) return
+    this.stopPolling()
     this.setData({ detailTab: tab, detailError: '' })
     await this.refreshCurrentTab()
+    if (tab === 'documents' && this.data.selected) this.startPolling(this.data.selected.id)
   },
   async refreshCurrentTab() {
     const kb = this.data.selected
