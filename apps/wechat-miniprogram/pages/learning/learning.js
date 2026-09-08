@@ -1,16 +1,65 @@
 const request = require('../../utils/request')
 const { formatError } = require('../../utils/format')
 Page({
-  data: { loading: true, error: '', libraries: [], plans: [], plan: null, tasks: [], modal: false, selectedKb: null, draft: null, form: { name: '', goal: '', target_date: '', daily_minutes: 30, weekly_days: 5 } },
+  data: { loading: true, error: '', libraries: [], plans: [], plan: null, tasks: [], modal: false, selectedKb: null, draft: null, creatingPlan: false, activatingPlan: false, generatingQuiz: false, form: { name: '', goal: '', target_date: '', daily_minutes: 30, weekly_days: 5 } },
   onShow() { this.load() },
-  async load() { this.setData({ loading: true, error: '' }); try { const [libraries, plans, tasks] = await Promise.all([request.get('/knowledge-bases'), request.get('/study-plans'), request.get('/tasks/today')]); const planItems = plans.items || []; this.setData({ libraries: libraries.items || [], plans: planItems, plan: planItems[0] || null, tasks: tasks.items || [], loading: false }) } catch (error) { this.setData({ loading: false, error: formatError(error) }) } },
-  openPlan() { const target = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10); this.setData({ modal: true, draft: null, selectedKb: this.data.libraries[0] || null, form: { name: '我的学习计划', goal: '', target_date: target, daily_minutes: 30, weekly_days: 5 } }) },
-  closePlan() { this.setData({ modal: false }) },
+  async load() {
+    this.setData({ loading: true, error: '' })
+    try {
+      const [libraries, plans, tasks] = await Promise.all([request.get('/knowledge-bases'), request.get('/study-plans'), request.get('/tasks/today')])
+      const libraryItems = libraries.items || []
+      const planItems = plans.items || []
+      const activePlan = planItems.find(item => item.status === 'ACTIVE') || planItems[0] || null
+      this.setData({ libraries: libraryItems, plans: planItems, plan: activePlan, tasks: tasks.items || [], loading: false })
+    } catch (error) { this.setData({ loading: false, error: formatError(error) }) }
+  },
+  openPlan() {
+    const target = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10)
+    const preferredKbId = Number(wx.getStorageSync('study-agent-plan-kb') || 0)
+    if (preferredKbId) wx.removeStorageSync('study-agent-plan-kb')
+    const selectedKb = this.data.libraries.find(item => item.id === preferredKbId) || this.data.libraries[0] || null
+    this.setData({ modal: true, draft: null, selectedKb, form: { name: '我的学习计划', goal: '', target_date: target, daily_minutes: 30, weekly_days: 5 } })
+  },
+  closePlan() { this.setData({ modal: false, draft: null, selectedKb: null }) },
   chooseKb(event) { this.setData({ selectedKb: this.data.libraries[event.detail.value] }) },
+  chooseDate(event) { this.setData({ 'form.target_date': event.detail.value }) },
   input(event) { this.setData({ [`form.${event.currentTarget.dataset.field}`]: event.detail.value }) },
-  async createPlan() { if (!this.data.selectedKb || !this.data.form.name.trim()) return; try { const plan = await request.post('/study-plans', { ...this.data.form, name: this.data.form.name.trim(), knowledge_base_id: this.data.selectedKb.id, daily_minutes: Number(this.data.form.daily_minutes), weekly_days: Number(this.data.form.weekly_days) }); this.setData({ draft: plan }); } catch (error) { this.setData({ error: formatError(error) }) } },
-  async confirmPlan() { if (!this.data.draft) return; try { await request.post(`/study-plans/${this.data.draft.id}/activate`); this.setData({ modal: false, plan: { ...this.data.draft, status: 'ACTIVE' } }); this.load() } catch (error) { this.setData({ error: formatError(error) }) } },
-  async complete(event) { const id = event.currentTarget.dataset.id; try { await request.post(`/tasks/${id}/complete`); this.load() } catch (error) { this.setData({ error: formatError(error) }) } },
-  async generateQuiz() { const kb = this.data.selectedKb || this.data.libraries[0]; if (!kb) return; try { const quiz = await request.post('/quizzes', { knowledge_base_id: kb.id, question_count: 5, question_types: ['SINGLE', 'MULTIPLE', 'TRUE_FALSE'] }); wx.navigateTo({ url: `/pages/quiz/quiz?id=${quiz.id}` }) } catch (error) { this.setData({ error: formatError(error) }) } },
+  async createPlan() {
+    if (!this.data.selectedKb || !this.data.form.name.trim() || this.data.creatingPlan) return
+    this.setData({ creatingPlan: true, error: '' })
+    try {
+      const plan = await request.post('/study-plans', { ...this.data.form, name: this.data.form.name.trim(), knowledge_base_id: this.data.selectedKb.id, daily_minutes: Number(this.data.form.daily_minutes), weekly_days: Number(this.data.form.weekly_days) })
+      this.setData({ draft: plan })
+    } catch (error) { this.setData({ error: formatError(error) }) }
+    finally { this.setData({ creatingPlan: false }) }
+  },
+  async confirmPlan() {
+    if (!this.data.draft || this.data.activatingPlan) return
+    this.setData({ activatingPlan: true, error: '' })
+    try {
+      await request.post(`/study-plans/${this.data.draft.id}/activate`)
+      this.setData({ modal: false, draft: null, selectedKb: null })
+      await this.load()
+    } catch (error) { this.setData({ error: formatError(error) }) }
+    finally { this.setData({ activatingPlan: false }) }
+  },
+  async complete(event) {
+    const id = Number(event.currentTarget.dataset.id)
+    const task = this.data.tasks.find(item => item.id === id)
+    if (!task || task.status === 'DONE') return
+    try { await request.post(`/tasks/${id}/complete`); await this.load() } catch (error) { this.setData({ error: formatError(error) }) }
+  },
+  async generateQuiz() {
+    if (this.data.generatingQuiz) return
+    const planKbId = this.data.plan?.knowledge_base_id
+    const kb = this.data.libraries.find(item => item.id === planKbId) || this.data.libraries[0]
+    if (!kb) { wx.showToast({ title: '请先创建知识库', icon: 'none' }); return }
+    this.setData({ generatingQuiz: true, error: '' })
+    try {
+      const quiz = await request.post('/quizzes', { knowledge_base_id: kb.id, question_count: 5, question_types: ['SINGLE', 'MULTIPLE', 'TRUE_FALSE', 'SHORT'] })
+      wx.navigateTo({ url: `/pages/quiz/quiz?id=${quiz.id}` })
+    } catch (error) { this.setData({ error: formatError(error) }) }
+    finally { this.setData({ generatingQuiz: false }) }
+  },
   retry() { this.load() }
 })
