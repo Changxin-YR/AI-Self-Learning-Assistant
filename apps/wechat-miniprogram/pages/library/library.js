@@ -1,7 +1,8 @@
 const request = require('../../utils/request')
 const { formatError } = require('../../utils/format')
+const EMPTY_FORM = { name: '', description: '', category: '课程', icon: '📘' }
 Page({
-  data: { loading: true, error: '', detailError: '', libraries: [], selected: null, documents: [], modal: false, name: '', uploading: false },
+  data: { loading: true, error: '', detailError: '', libraries: [], visibleLibraries: [], query: '', selected: null, documents: [], modal: false, editing: false, form: { ...EMPTY_FORM }, uploading: false, categories: ['课程', '考试', '技术', '其他'] },
   onShow() {
     this.load().then(() => {
       if (this.data.selected) this.startPolling(this.data.selected.id)
@@ -23,6 +24,12 @@ Page({
       this.loadDocuments(kbId, generation).finally(() => { this.pollInFlight = false })
     }, 5000)
   },
+  applyFilter(libraries = this.data.libraries, query = this.data.query) {
+    const keyword = String(query || '').trim().toLowerCase()
+    const visibleLibraries = keyword ? libraries.filter(item => `${item.name} ${item.description || ''} ${item.category || ''}`.toLowerCase().includes(keyword)) : libraries
+    this.setData({ visibleLibraries })
+  },
+  inputSearch(event) { const query = event.detail.value; this.setData({ query }); this.applyFilter(this.data.libraries, query) },
   async load() {
     this.setData({ loading: true, error: '' })
     try {
@@ -31,19 +38,64 @@ Page({
       let selected = this.data.selected
       if (selected) selected = libraries.find(item => item.id === selected.id) || null
       this.setData({ libraries, selected, loading: false })
+      this.applyFilter(libraries, this.data.query)
       if (selected) await this.loadDocuments(selected.id, this.pollGeneration)
     } catch (error) { this.setData({ loading: false, error: formatError(error) }) }
   },
-  openCreate() { this.setData({ modal: true, name: '' }) },
-  closeCreate() { this.setData({ modal: false }) },
-  inputName(event) { this.setData({ name: event.detail.value }) },
-  async create() {
-    if (!this.data.name.trim()) return
+  openCreate() { this.setData({ modal: true, editing: false, form: { ...EMPTY_FORM } }) },
+  openEdit() {
+    const kb = this.data.selected
+    if (!kb) return
+    this.setData({ modal: true, editing: true, form: { name: kb.name || '', description: kb.description || '', category: kb.category || '其他', icon: kb.icon || '📚' } })
+  },
+  closeCreate() { this.setData({ modal: false, editing: false }) },
+  inputForm(event) { this.setData({ [`form.${event.currentTarget.dataset.field}`]: event.detail.value }) },
+  chooseCategory(event) { this.setData({ 'form.category': this.data.categories[Number(event.detail.value)] || '其他' }) },
+  async saveKnowledgeBase() {
+    const name = this.data.form.name.trim()
+    if (!name) { wx.showToast({ title: '请输入知识库名称', icon: 'none' }); return }
+    const payload = { name, description: this.data.form.description.trim(), category: this.data.form.category || '其他', icon: this.data.form.icon.trim() || '📚', status: this.data.editing ? (this.data.selected?.status || 'ACTIVE') : 'ACTIVE' }
     try {
-      const kb = await request.post('/knowledge-bases', { name: this.data.name.trim(), category: '课程', icon: '📘' })
-      this.setData({ libraries: [kb, ...this.data.libraries], modal: false })
-      await this.select({ currentTarget: { dataset: { kb } } })
+      if (this.data.editing && this.data.selected) {
+        const kb = await request.patch(`/knowledge-bases/${this.data.selected.id}`, payload)
+        this.setData({ selected: kb, modal: false, editing: false })
+        await this.load()
+      } else {
+        const kb = await request.post('/knowledge-bases', payload)
+        this.setData({ modal: false })
+        await this.load()
+        await this.select({ currentTarget: { dataset: { kb } } })
+      }
     } catch (error) { this.setData({ error: formatError(error) }) }
+  },
+  async toggleArchive() {
+    const kb = this.data.selected
+    if (!kb) return
+    const status = kb.status === 'ARCHIVED' ? 'ACTIVE' : 'ARCHIVED'
+    try {
+      const updated = await request.patch(`/knowledge-bases/${kb.id}`, { name: kb.name, description: kb.description || '', category: kb.category || '其他', icon: kb.icon || '📚', status })
+      this.setData({ selected: updated })
+      await this.load()
+    } catch (error) { this.setData({ detailError: formatError(error) }) }
+  },
+  deleteKnowledgeBase() {
+    const kb = this.data.selected
+    if (!kb) return
+    wx.showModal({
+      title: '删除知识库',
+      content: `确定删除“${kb.name}”吗？其中的资料与检索索引也会进入清理流程。`,
+      confirmText: '删除',
+      confirmColor: '#d94b5a',
+      success: async result => {
+        if (!result.confirm) return
+        try {
+          this.stopPolling()
+          await request.del(`/knowledge-bases/${kb.id}`)
+          this.setData({ selected: null, documents: [], detailError: '' })
+          await this.load()
+        } catch (error) { this.setData({ detailError: formatError(error) }) }
+      }
+    })
   },
   async select(event) {
     const kb = event.currentTarget.dataset.kb || event.currentTarget.dataset.item
@@ -117,6 +169,14 @@ Page({
     })
   },
   chat() { if (this.data.selected) wx.navigateTo({ url: `/pages/chat/chat?kbId=${this.data.selected.id}&name=${encodeURIComponent(this.data.selected.name)}` }) },
+  createPlan() { if (this.data.selected) { wx.setStorageSync('study-agent-plan-kb', this.data.selected.id); wx.switchTab({ url: '/pages/learning/learning' }) } },
+  async generateQuiz() {
+    if (!this.data.selected) return
+    try {
+      const quiz = await request.post('/quizzes', { knowledge_base_id: this.data.selected.id, question_count: 5, question_types: ['SINGLE', 'MULTIPLE', 'TRUE_FALSE', 'SHORT'] })
+      wx.navigateTo({ url: `/pages/quiz/quiz?id=${quiz.id}` })
+    } catch (error) { this.setData({ detailError: formatError(error) }) }
+  },
   retry() { this.load() },
   retryDocuments() { if (this.data.selected) this.loadDocuments(this.data.selected.id, this.pollGeneration) }
 })
