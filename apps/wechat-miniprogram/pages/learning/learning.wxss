@@ -1,0 +1,9 @@
+.analysis-row { display:flex; align-items:center; gap:16rpx; padding:18rpx 0; border-bottom:1rpx solid #f0f1f4; }
+.analysis-row:last-child { border-bottom:0; }
+.analysis-row text:first-child { flex:1; font-size:24rpx; line-height:1.5; }
+.analysis-value { color:#5B5FF6; font-size:26rpx; font-weight:600; }
+.trend-row { display:flex; align-items:center; gap:12rpx; padding:10rpx 0; }
+.trend-date { width:72rpx; font-size:20rpx; }
+.trend-track { flex:1; height:12rpx; background:#eef0f5; border-radius:12rpx; overflow:hidden; }
+.trend-fill { height:100%; min-width:4rpx; background:#5B5FF6; border-radius:12rpx; }
+.trend-minutes { width:48rpx; text-align:right; color:#555b69; font-size:21rpx; }
