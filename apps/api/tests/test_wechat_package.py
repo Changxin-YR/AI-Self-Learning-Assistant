@@ -44,6 +44,19 @@ def test_library_polling_is_scoped_and_destructive_actions_are_confirmed():
     assert "搜索知识库" in library_wxml
 
 
+def test_library_detail_tabs_use_real_existing_apis():
+    library = read("pages/library/library.js")
+    library_wxml = read("pages/library/library.wxml")
+    assert "switchDetailTab" in library
+    assert "loadMastery" in library
+    assert "loadHistory" in library
+    assert "/mastery`" in library
+    assert "request.get('/conversations')" in library
+    assert "conversationId=${item.id}" in library
+    assert "知识点" in library_wxml
+    assert "历史对话" in library_wxml
+
+
 def test_chat_can_recover_and_citations_are_inspectable():
     chat = read("pages/chat/chat.js")
     chat_wxml = read("pages/chat/chat.wxml")
@@ -53,14 +66,20 @@ def test_chat_can_recover_and_citations_are_inspectable():
     assert "查看来源" in chat_wxml
 
 
-def test_learning_uses_active_plan_and_native_date_picker():
+def test_learning_uses_active_plan_native_date_picker_and_real_analytics():
     learning = read("pages/learning/learning.js")
     learning_wxml = read("pages/learning/learning.wxml")
     assert "find(item => item.status === 'ACTIVE')" in learning
     assert "const planKbId = this.data.plan?.knowledge_base_id" in learning
     assert "'SHORT'" in learning
+    assert "request.get('/dashboard')" in learning
+    assert "dashboard.mastery" in learning
+    assert "dashboard.trend" in learning
     assert 'mode="date"' in learning_wxml
     assert 'type="date"' not in learning_wxml
+    assert "学习分析" in learning_wxml
+    assert "薄弱知识点" in learning_wxml
+    assert "学习趋势" in learning_wxml
 
 
 def test_quiz_prevents_double_submit_and_profile_uses_native_text_nodes():
