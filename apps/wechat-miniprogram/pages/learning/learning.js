@@ -1,20 +1,31 @@
 const request = require('../../utils/request')
 const { formatError } = require('../../utils/format')
 Page({
-  data: { loading: true, error: '', libraries: [], plans: [], plan: null, tasks: [], modal: false, selectedKb: null, draft: null, creatingPlan: false, activatingPlan: false, generatingQuiz: false, form: { name: '', goal: '', target_date: '', daily_minutes: 30, weekly_days: 5 } },
+  data: { loading: true, error: '', libraries: [], plans: [], plan: null, tasks: [], dashboard: {}, masteryPreview: [], trend: [], weakPointsText: '', daysRemaining: 0, modal: false, selectedKb: null, draft: null, creatingPlan: false, activatingPlan: false, generatingQuiz: false, form: { name: '', goal: '', target_date: '', daily_minutes: 30, weekly_days: 5 } },
   async onShow() {
     if (getApp().globalData.signedOut) { wx.switchTab({ url: '/pages/home/home' }); return }
     await this.load()
     if (wx.getStorageSync('study-agent-plan-kb') && this.data.libraries.length) this.openPlan()
   },
+  buildAnalytics(dashboard, plan) {
+    const masteryPreview = [...(dashboard.mastery || [])].sort((a, b) => a.score - b.score).slice(0, 5)
+    const maxMinutes = Math.max(1, ...(dashboard.trend || []).map(item => Number(item.minutes || 0)))
+    const trend = (dashboard.trend || []).map(item => ({ ...item, percent: Math.round(Number(item.minutes || 0) / maxMinutes * 100), shortDate: String(item.date || '').slice(5) }))
+    let daysRemaining = 0
+    if (plan?.target_date) {
+      const target = new Date(`${plan.target_date}T23:59:59`)
+      daysRemaining = Math.max(0, Math.ceil((target.getTime() - Date.now()) / 86400000))
+    }
+    return { masteryPreview, trend, weakPointsText: (dashboard.weak_points || []).slice(0, 5).join('、'), daysRemaining }
+  },
   async load() {
     this.setData({ loading: true, error: '' })
     try {
-      const [libraries, plans, tasks] = await Promise.all([request.get('/knowledge-bases'), request.get('/study-plans'), request.get('/tasks/today')])
+      const [libraries, plans, tasks, dashboard] = await Promise.all([request.get('/knowledge-bases'), request.get('/study-plans'), request.get('/tasks/today'), request.get('/dashboard')])
       const libraryItems = libraries.items || []
       const planItems = plans.items || []
       const activePlan = planItems.find(item => item.status === 'ACTIVE') || planItems[0] || null
-      this.setData({ libraries: libraryItems, plans: planItems, plan: activePlan, tasks: tasks.items || [], loading: false })
+      this.setData({ libraries: libraryItems, plans: planItems, plan: activePlan, tasks: tasks.items || [], dashboard, ...this.buildAnalytics(dashboard, activePlan), loading: false })
     } catch (error) { this.setData({ loading: false, error: formatError(error) }) }
   },
   openPlan() {
