@@ -1,12 +1,12 @@
 const request = require('../../utils/request')
 const { formatError } = require('../../utils/format')
 Page({
-  data: { loading: true, error: '', dashboard: {}, libraries: [], recentLibraries: [], progress: 0, nickname: '学习者', signedOut: false },
+  data: { loading: true, error: '', dashboard: {}, libraries: [], recentLibraries: [], progress: 0, nickname: '学习者', signedOut: false, weakPointsText: '' },
   onShow() {
     const signedOut = Boolean(getApp().globalData.signedOut)
     this.setData({ signedOut })
     if (signedOut) {
-      this.setData({ loading: false, error: '', dashboard: {}, libraries: [], recentLibraries: [], progress: 0, nickname: '学习者' })
+      this.setData({ loading: false, error: '', dashboard: {}, libraries: [], recentLibraries: [], progress: 0, nickname: '学习者', weakPointsText: '' })
       return
     }
     this.load()
@@ -33,6 +33,7 @@ Page({
         recentLibraries: items.slice(0, 3),
         progress: dashboard.task_total ? Math.round(dashboard.task_done / dashboard.task_total * 100) : 0,
         nickname,
+        weakPointsText: (dashboard.weak_points || []).join('、'),
         loading: false,
         signedOut: false
       })
