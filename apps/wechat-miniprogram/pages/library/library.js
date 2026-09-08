@@ -2,7 +2,7 @@ const request = require('../../utils/request')
 const { formatError } = require('../../utils/format')
 const EMPTY_FORM = { name: '', description: '', category: '课程', icon: '📘' }
 Page({
-  data: { loading: true, error: '', detailError: '', libraries: [], visibleLibraries: [], query: '', selected: null, documents: [], modal: false, editing: false, form: { ...EMPTY_FORM }, uploading: false, categories: ['课程', '考试', '技术', '其他'] },
+  data: { loading: true, error: '', detailError: '', libraries: [], visibleLibraries: [], query: '', selected: null, documents: [], mastery: [], conversations: [], detailTab: 'documents', detailLoading: false, modal: false, editing: false, form: { ...EMPTY_FORM }, uploading: false, categories: ['课程', '考试', '技术', '其他'] },
   onShow() {
     if (getApp().globalData.signedOut) { this.stopPolling(); wx.switchTab({ url: '/pages/home/home' }); return }
     this.load().then(() => {
@@ -40,7 +40,7 @@ Page({
       if (selected) selected = libraries.find(item => item.id === selected.id) || null
       this.setData({ libraries, selected, loading: false })
       this.applyFilter(libraries, this.data.query)
-      if (selected) await this.loadDocuments(selected.id, this.pollGeneration)
+      if (selected) await this.refreshCurrentTab()
     } catch (error) { this.setData({ loading: false, error: formatError(error) }) }
   },
   openCreate() { this.setData({ modal: true, editing: false, form: { ...EMPTY_FORM } }) },
@@ -92,7 +92,7 @@ Page({
         try {
           this.stopPolling()
           await request.del(`/knowledge-bases/${kb.id}`)
-          this.setData({ selected: null, documents: [], detailError: '' })
+          this.setData({ selected: null, documents: [], mastery: [], conversations: [], detailError: '' })
           await this.load()
         } catch (error) { this.setData({ detailError: formatError(error) }) }
       }
@@ -103,9 +103,45 @@ Page({
     if (!kb) return
     this.stopPolling()
     const generation = this.pollGeneration
-    this.setData({ selected: kb, documents: [], detailError: '' })
+    this.setData({ selected: kb, documents: [], mastery: [], conversations: [], detailTab: 'documents', detailError: '' })
     await this.loadDocuments(kb.id, generation)
     if (this.data.selected && this.data.selected.id === kb.id && generation === this.pollGeneration) this.startPolling(kb.id)
+  },
+  async switchDetailTab(event) {
+    const tab = event.currentTarget.dataset.tab
+    if (!['documents', 'mastery', 'history'].includes(tab)) return
+    this.setData({ detailTab: tab, detailError: '' })
+    await this.refreshCurrentTab()
+  },
+  async refreshCurrentTab() {
+    const kb = this.data.selected
+    if (!kb) return
+    if (this.data.detailTab === 'mastery') return this.loadMastery(kb.id)
+    if (this.data.detailTab === 'history') return this.loadHistory(kb.id)
+    return this.loadDocuments(kb.id, this.pollGeneration)
+  },
+  async loadMastery(kbId) {
+    this.setData({ detailLoading: true })
+    try {
+      const result = await request.get(`/knowledge-bases/${kbId}/mastery`)
+      if (this.data.selected?.id === kbId) this.setData({ mastery: result.items || [], detailError: '' })
+    } catch (error) {
+      if (this.data.selected?.id === kbId) this.setData({ detailError: formatError(error) })
+    } finally { this.setData({ detailLoading: false }) }
+  },
+  async loadHistory(kbId) {
+    this.setData({ detailLoading: true })
+    try {
+      const result = await request.get('/conversations')
+      if (this.data.selected?.id === kbId) this.setData({ conversations: (result.items || []).filter(item => item.knowledge_base_id === kbId), detailError: '' })
+    } catch (error) {
+      if (this.data.selected?.id === kbId) this.setData({ detailError: formatError(error) })
+    } finally { this.setData({ detailLoading: false }) }
+  },
+  openConversation(event) {
+    const item = event.currentTarget.dataset.item
+    if (!item || !this.data.selected) return
+    wx.navigateTo({ url: `/pages/chat/chat?kbId=${this.data.selected.id}&name=${encodeURIComponent(this.data.selected.name)}&conversationId=${item.id}` })
   },
   async loadDocuments(kbId, generation = this.pollGeneration) {
     try {
@@ -179,5 +215,5 @@ Page({
     } catch (error) { this.setData({ detailError: formatError(error) }) }
   },
   retry() { this.load() },
-  retryDocuments() { if (this.data.selected) this.loadDocuments(this.data.selected.id, this.pollGeneration) }
+  retryDocuments() { this.refreshCurrentTab() }
 })
