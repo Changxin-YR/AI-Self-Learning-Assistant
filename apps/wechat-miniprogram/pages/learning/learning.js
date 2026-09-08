@@ -2,7 +2,10 @@ const request = require('../../utils/request')
 const { formatError } = require('../../utils/format')
 Page({
   data: { loading: true, error: '', libraries: [], plans: [], plan: null, tasks: [], modal: false, selectedKb: null, draft: null, creatingPlan: false, activatingPlan: false, generatingQuiz: false, form: { name: '', goal: '', target_date: '', daily_minutes: 30, weekly_days: 5 } },
-  onShow() { this.load() },
+  async onShow() {
+    await this.load()
+    if (wx.getStorageSync('study-agent-plan-kb') && this.data.libraries.length) this.openPlan()
+  },
   async load() {
     this.setData({ loading: true, error: '' })
     try {
