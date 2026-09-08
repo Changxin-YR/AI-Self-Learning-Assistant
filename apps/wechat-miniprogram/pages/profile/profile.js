@@ -1,9 +1,11 @@
 const request = require('../../utils/request')
 Page({
   data: { dashboard: {}, nickname: '学习者', avatar: '学', panel: '' },
-  onShow() { this.load() },
+  onShow() {
+    if (getApp().globalData.signedOut) { wx.switchTab({ url: '/pages/home/home' }); return }
+    this.load()
+  },
   async load() {
-    if (getApp().globalData.signedOut) return
     try {
       const dashboard = await request.get('/dashboard')
       const app = getApp()
